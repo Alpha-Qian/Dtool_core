@@ -8,16 +8,6 @@ pub trait Tracker {
     async fn fetch_add(&self, len: u32);
 }
 
-struct BaseTracker{
-    len: AtomicU64,
-}
-
-impl Tracker for BaseTracker {
-    async fn fetch_add(&self, len: u32) {
-        self.len.fetch_add(len as u64, Ordering::Release);
-    }
-}
-
 struct AtomicTracker{
     len: AtomicU64,
 }
@@ -143,6 +133,7 @@ pub trait TrackerBuilder {
 
 
 struct RefBuilder<T>(T);
+struct OwnedBuilder<T>(T);
 
 impl<T: Tracker> TrackerBuilder for RefBuilder<T> {
     type Output<'a> = &'a T where Self: 'a;
@@ -151,7 +142,6 @@ impl<T: Tracker> TrackerBuilder for RefBuilder<T> {
     }
 }
 
-struct OwnedBuilder<T>(T);
 
 impl <T: Tracker + Clone> TrackerBuilder for OwnedBuilder<T> {
     type Output<'a> = T where Self: 'a;
@@ -162,6 +152,8 @@ impl <T: Tracker + Clone> TrackerBuilder for OwnedBuilder<T> {
 
 impl_process_tuple!(T1);
 impl_process_tuple!(T1, T2);
+
+
 
 
 #[cfg(test)]

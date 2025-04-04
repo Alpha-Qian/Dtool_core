@@ -26,6 +26,16 @@ struct DeafultCreater<'a, C:Cacher> {
     downloader:&'a UrlDownloader<'a, C>,
 
 }
+enum CreateTaskError {
+    AllBlockDone,
+    RemainProcessTooSmall,
+}
+
+enum CancelTaskError {
+    NoRunningBlock,
+}
+
+type CreateTaskResult<T> = Result<T, CreateTaskError>;
 
 impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
 
@@ -37,7 +47,7 @@ impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
         let mut all_done = true;
         for block in blocks.iter(){
             let p = block.process.load(Ordering::Relaxed);//因为有锁保护，内存顺序无所谓
-            let end = block.end.load(Ordering::Relaxed);
+            let end = block.end;
             let remain = end - p;
             remains.push(remain);
             if (remain) > 0{
@@ -45,7 +55,7 @@ impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
             }
             need_divition_times.push(if block.is_running() {1} else {0});
         }
-        if all_done {return}
+        if all_done {return Err(CreateTaskError::AllBlockDone);}
         
         for i in 0..times{
             let mut max_remain= 0;
@@ -89,6 +99,7 @@ impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
                 insert_index += need_divition_times[i] - 1;
             }
         }
+        Ok(())
     }
     
     fn divition_task(&self) {
@@ -105,7 +116,6 @@ impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
                 max_ramain = remain;
                 max_block_index = Some(index);
             }
-
         }
         if let Some(index) = max_block_index{
             let block = blocks.remove(index);
