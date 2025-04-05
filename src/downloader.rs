@@ -37,15 +37,15 @@ use crate::cache::{Writer, Cacher};
 use crate::tracker::{Tracker, TrackerBuilder};
 use futures;
 
-type BlocksVec<'a, T: TrackerBuilder + 'a> = Vec<Box<Block<T::Output<'a>>>>;
+type BlocksVec<T: TrackerBuilder> = Vec<Box<Block<T::Output>>>;
 
-struct DownloadRef<'a, C, T : TrackerBuilder + 'a>{
+struct DownloadRef<C, T : TrackerBuilder>{
     url:String,
     cache: C,
     tracker_builder: T,
     //task_call_back: B,    //任务完成或可恢复错误回调
     headers: HeaderMap,
-    blocks: RwLock<BlocksVec<'a, T>>,
+    blocks: RwLock<BlocksVec<T>>,
 
     connection: AtomicU16,      //已经建立的连接数
 
@@ -54,9 +54,9 @@ struct DownloadRef<'a, C, T : TrackerBuilder + 'a>{
     block_done: AtomicU16,
 }
 
-pub struct UrlDownloader<'a, C, T: TrackerBuilder> {
+pub struct UrlDownloader<C, T: TrackerBuilder> {
     client: reqwest::Client,//Client自带Arc
-    pub(crate) inner: Arc<DownloadRef<'a, C, T>>,
+    pub(crate) inner: Arc<DownloadRef<C, T>>,
     pub(crate) tasks: JoinSet<DownloadResult<()>>,
 }
 
@@ -154,7 +154,7 @@ impl<C: cache::Cacher, T:TrackerBuilder> UrlDownloader<C, T> {
         }
     }
 
-    pub fn blocks(&self) -> &RwLock<Vec<Box<Block<T::Output<'_>>>>>{
+    pub fn blocks(&self) -> &RwLock<Vec<Box<Block<T::Output>>>>{
         &self.inner.blocks
     }
     
@@ -225,7 +225,7 @@ impl<C: cache::Cacher, T:TrackerBuilder> UrlDownloader<C, T> {
 ///定义需要在tokio中运行的方法
 impl<C: Cacher, T: TrackerBuilder> DownloadRef<C, T> {
 
-    async fn start_block(self: Arc<Self>, client: Client, block: RunningGuard<C, T::Output<'_>>) -> DownloadResult<()> {                      
+    async fn start_block(self: Arc<Self>, client: Client, block: RunningGuard<C, T::Output>) -> DownloadResult<()> {                      
         let response = client.get(&self.url)
             .headers(self.headers.clone())
             //.header(RANGE, format!("bytes={}-{}", block.process.load(Ordering::Acquire), block.end - 1))
@@ -236,14 +236,14 @@ impl<C: Cacher, T: TrackerBuilder> DownloadRef<C, T> {
     }
 
     ///获取response返回的字节流
-    async fn download_block(self: Arc<Self>, response: Response, block: RunningGuard<C, T::Output<'_>>) -> DownloadResult<()>{
+    async fn download_block(self: Arc<Self>, response: Response, block: RunningGuard<C, T::Output>) -> DownloadResult<()>{
         //BlockGuard的生命周期必须小于Arc<Self>
         block.on_receiving();
         let mut writer= self.cache.write_at(SeekFrom::Start(block.start)).await;
 
         let mut process = block.process.load(Ordering::Acquire);
         let mut stream = response.bytes_stream();
-        while let Some(item) = stream.next().await {
+        while let Some(item) = stream.next().await{
             let chunk = item?;
             let chunk_size = chunk.len();
 

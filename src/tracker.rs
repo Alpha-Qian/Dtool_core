@@ -1,11 +1,13 @@
-///多线程下载器中的总精度计划用tracker实现
-/// 
-
 use std::{ops::Deref, sync::atomic::{AtomicU64, Ordering}};
 
 
 pub trait Tracker {
     async fn fetch_add(&self, len: u32);
+}
+
+pub trait TrackerBuilder: Tracker {
+    type Output: Tracker;
+    fn build_tracker(&self) -> Self::Output;
 }
 
 struct AtomicTracker{
@@ -108,52 +110,9 @@ macro_rules! impl_process_tuple {
     };
 }
 
-impl Tracker for () {
-    async fn fetch_add(&self, len: u32) {}
-}
-
-impl<T:Tracker> Tracker for &T {
-    async fn fetch_add(&self, len: u32) {
-        (*self).fetch_add(len).await;
-    }
-}
-
-/* 
-impl<T:Deref(Target=Tracker)> Tracker for T {
-    
-}*/
-
-pub trait TrackerBuilder {
-    type Output<'a>: Tracker
-    where
-        Self: 'a;
-    fn build_tracker(&self) -> Self::Output<'_>;
-}
-
-
-
-struct RefBuilder<T>(T);
-struct OwnedBuilder<T>(T);
-
-impl<T: Tracker> TrackerBuilder for RefBuilder<T> {
-    type Output<'a> = &'a T where Self: 'a;
-    fn build_tracker(&self) -> Self::Output<'_> {
-        &self.0
-    }
-}
-
-
-impl <T: Tracker + Clone> TrackerBuilder for OwnedBuilder<T> {
-    type Output<'a> = T where Self: 'a;
-    fn build_tracker(&self) -> Self::Output<'_> {
-        self.0.clone()
-    }
-}
 
 impl_process_tuple!(T1);
 impl_process_tuple!(T1, T2);
-
-
 
 
 #[cfg(test)]
