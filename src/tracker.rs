@@ -1,11 +1,11 @@
-use std::{ops::Deref, sync::atomic::{AtomicU64, Ordering}};
+use std::{sync::atomic::{AtomicU64, Ordering}};
 
 
 pub trait Tracker {
     async fn fetch_add(&self, len: u32);
 }
 
-pub trait TrackerBuilder: Tracker {
+pub trait TrackerBuilder{
     type Output: Tracker;
     fn build_tracker(&self) -> Self::Output;
 }
@@ -32,7 +32,7 @@ impl Tracker for AtomicTracker {
     }
 }
 
-struct NilTracker();
+pub struct NilTracker();
 
 impl Tracker for NilTracker {
     async fn fetch_add(&self, len: u32) {}
@@ -115,6 +115,12 @@ impl_process_tuple!(T1);
 impl_process_tuple!(T1, T2);
 
 
+///
+impl<T: Tracker> Tracker for &T {
+    async fn fetch_add(&self, len: u32) {
+        (*self).fetch_add(len).await;
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

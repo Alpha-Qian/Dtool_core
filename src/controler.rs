@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cache::Cacher;
-use crate::downloader::UrlDownloader;
+use crate::downloader::{UrlDownloader,DownloadRef};
 
 pub trait TaskCreate {
     
@@ -22,8 +22,8 @@ pub trait TaskCreate {
     }
 }
 
-struct DeafultCreater<'a, C:Cacher> {
-    downloader:&'a UrlDownloader<'a, C>,
+struct DeafultCreater<C:Cacher> {
+    downloader: UrlDownloader<C>,
 
 }
 enum CreateTaskError {
@@ -37,7 +37,7 @@ enum CancelTaskError {
 
 type CreateTaskResult<T> = Result<T, CreateTaskError>;
 
-impl<C:Cacher> TaskCreate for DeafultCreater<'_,C> {
+impl<C: Cacher> TaskCreate for DeafultCreater<'_,C> {
 
     fn division_tasks(&self, times:u32){
         let mut blocks = self.info.blocks.write();//获取写锁守护
@@ -129,11 +129,23 @@ pub trait Controler {
 }
 
 struct CreateOneByOne{
-    downloader: UrlDownloader<'static, Cacher>,
+    downloader: UrlDownloader<Cacher>,
 }
 
 impl CreateOneByOne {
     async fn run() {
         return Ok(());
     }
+}
+
+trait Monitor {
+    fn new_task(&self);
+    fn on_receiving(&self);
+    fn task_done(&self); 
+    fn task_to_pending(&self);
+}
+
+trait AutoControler: Monitor + TaskCreate {
+    fn check(&self);
+    fn update(&self);
 }

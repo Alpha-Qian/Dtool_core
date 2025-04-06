@@ -8,13 +8,11 @@ use std::{
 
     },
     mem::{MaybeUninit,
-        zeroed,
     },
     io::SeekFrom,
     ops::Deref,
-    fmt::Display,
 };
-//use std::error::Error;
+
 use thiserror::Error;
 use headers::{self,
     HeaderMapExt,
@@ -39,12 +37,12 @@ use futures;
 
 type BlocksVec<T: TrackerBuilder> = Vec<Box<Block<T::Output>>>;
 
-struct DownloadRef<C, T : TrackerBuilder>{
+pub struct DownloadRef<C, T, H, Co> 
+{
     url:String,
     cache: C,
     tracker_builder: T,
-    //task_call_back: B,    //任务完成或可恢复错误回调
-    headers: HeaderMap,
+    headers: H,
     blocks: RwLock<BlocksVec<T>>,
 
     connection: AtomicU16,      //已经建立的连接数
@@ -52,15 +50,15 @@ struct DownloadRef<C, T : TrackerBuilder>{
     blocks_pending: AtomicU16,
     blocks_running: AtomicU16,
     block_done: AtomicU16,
+    controler: Co,//监视器和控制器
 }
-
-pub struct UrlDownloader<C, T: TrackerBuilder> {
+pub struct UrlDownloader<C, T, H, Co> {
     client: reqwest::Client,//Client自带Arc
-    pub(crate) inner: Arc<DownloadRef<C, T>>,
+    pub(crate) inner: Arc<DownloadRef<C, T, H, Co>>,
     pub(crate) tasks: JoinSet<DownloadResult<()>>,
 }
 
-///单线程可续传下载器
+  ///单线程可续传下载器
 struct RangeableDownloader<C, T>{
     cache: C,
     tracker: T,
@@ -95,7 +93,7 @@ enum EnsureUrlKind {
 }
 
 
-#[derive(Debug, Error, Display)]
+#[derive(Debug, Error)]
 enum DownloadError {
     WriteError(),
     NetworkError(#[from] reqwest::Error),
@@ -137,8 +135,9 @@ async fn send_first_request(client: Client, url: &str, headers: &HeaderMap) -> D
     Ok(response)
 }
 
-impl<C: cache::Cacher, T:TrackerBuilder> UrlDownloader<C, T> {
-
+impl<C, T, H> UrlDownloader<C, T, H> 
+where C: Cacher, T: TrackerBuilder 
+{
     fn from_downloadinfo(info: DonwloadInfo, cache: C, tracker_builder: T) -> Self {
         Self {
             client: info.client,
@@ -223,7 +222,7 @@ impl<C: cache::Cacher, T:TrackerBuilder> UrlDownloader<C, T> {
 
 
 ///定义需要在tokio中运行的方法
-impl<C: Cacher, T: TrackerBuilder> DownloadRef<C, T> {
+impl<C: Cacher, T: TrackerBuilder, H: FnMut(&HeaderMap)> DownloadRef<C, T, H> {
 
     async fn start_block(self: Arc<Self>, client: Client, block: RunningGuard<C, T::Output>) -> DownloadResult<()> {                      
         let response = client.get(&self.url)
@@ -251,11 +250,16 @@ impl<C: Cacher, T: TrackerBuilder> DownloadRef<C, T> {
             if process + chunk_size as u64 > block.end {
                 writer.down_write(&chunk[..(block.end - process) as usize]).await?;
                 block.process.store(block.end, Ordering::Release);
+
+                block.tracker.fetch_add(block.end - process).await;
+                self.tracker_builder.fetch_add((block.end - process) as u32).await;
                 break;
             }
             writer.down_write(chunk.as_ref()).await?;
-            process += chunk_size as u64;
             block.process.store(process, Ordering::Release);
+            
+            block.tracker.fetch_add(chunk_size as u32).await;
+            self.tracker_builder.fetch_add(chunk_size as u32).await;
         };
         Ok(())
     }
@@ -288,7 +292,7 @@ impl<C, T> UnRangeableDownloader<C, T> {
 
 
 struct RecevingGuard<C,T> {
-    downloader: Arc<DownloadRef<C,T>>,
+    downloader: Arc<DownloadRef<C, T>>,
 }
 
 impl<C: Cacher, T: TrackerBuilder> RecevingGuard<C, T> {
