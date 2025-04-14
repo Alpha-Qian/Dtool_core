@@ -2,6 +2,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cache::Cacher;
+use crate::tracker::Tracker;
 use crate::downloader::{UrlDownloader,DownloadRef};
 
 pub trait TaskCreate {
@@ -22,10 +23,6 @@ pub trait TaskCreate {
     }
 }
 
-struct DeafultCreater<C:Cacher> {
-    downloader: UrlDownloader<C>,
-
-}
 enum CreateTaskError {
     AllBlockDone,
     RemainProcessTooSmall,
@@ -142,10 +139,20 @@ trait Monitor {
     fn new_task(&self);
     fn on_receiving(&self);
     fn task_done(&self); 
-    fn task_to_pending(&self);
+    fn task_to_waiting(&self);
 }
 
-trait AutoControler: Monitor + TaskCreate {
+trait TestTaskCreate {
+    fn test_divition_task<C, T, H, Co>(&self, downloader: &DownloadRef<C, T, H, Co>);
+    fn test_cancel_task<C, T, H, Co>(&self, downloader: &DownloadRef<C, T, H, Co>);
+}
+trait AutoControler: Monitor + TaskCreate + Tracker {
     fn check(&self);
     fn update(&self);
+}
+
+
+trait RunningGuard{
+    type Guard;
+    async fn new_guard(&self) -> Self::Guard;
 }

@@ -1,65 +1,43 @@
 //use std::io::SeekFrom;
-use std::{
-    sync::{
-        Arc,
-        atomic::{
-            AtomicU8, AtomicU16, AtomicU64, Ordering
-        },
-
-    },
-    mem::{MaybeUninit,
-    },
-    io::SeekFrom,
-    ops::Deref,
-};
-
+use std::{future::Future, io::SeekFrom, mem::{transmute, transmute_copy, MaybeUninit}, ops::Deref, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}};
 use thiserror::Error;
 use headers::{self,
     HeaderMapExt,
-    Range
-};
+    Range};
 use reqwest::{
-    self, Client, Request, RequestBuilder, Response,
-    header::{
+    self, header::{
         self, HeaderMap,HeaderValue, IF_MATCH, IF_RANGE, RANGE
-    }
+    }, Client, Method, Request, RequestBuilder, Response, Url
 };
 use parking_lot::{
     RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use futures::stream::StreamExt;
-use tokio::task::{JoinHandle, AbortHandle, JoinSet};
+use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
 use crate::{cache, tracker};
 
 use crate::cache::{Writer, Cacher};
 use crate::tracker::{Tracker, TrackerBuilder};
 use futures;
 
-type BlocksVec<T: TrackerBuilder> = Vec<Box<Block<T::Output>>>;
-
-pub struct DownloadRef<C, T, H, Co> 
-{
-    url:String,
+pub struct DownloadRef{
+    url: Url,
+    blocks: RwLock<Vec<Box<Block<T::Output>>>>,
+    semaphore: tokio::sync::Semaphore,
+    headers_builder: H,
     cache: C,
-    tracker_builder: T,
-    headers: H,
-    blocks: RwLock<BlocksVec<T>>,
-
-    connection: AtomicU16,      //已经建立的连接数
-
-    blocks_pending: AtomicU16,
-    blocks_running: AtomicU16,
-    block_done: AtomicU16,
-    controler: Co,//监视器和控制器
+    controler: Co,
+    tasks: JoinSet<DownloadResult<()>>,
 }
-pub struct UrlDownloader<C, T, H, Co> {
+pub struct UrlDownloader {
     client: reqwest::Client,//Client自带Arc
-    pub(crate) inner: Arc<DownloadRef<C, T, H, Co>>,
+    pub(crate) inner: Arc<DownloadRef>,
     pub(crate) tasks: JoinSet<DownloadResult<()>>,
 }
 
-  ///单线程可续传下载器
+///单线程可续传下载器
 struct RangeableDownloader<C, T>{
+    url: Url,
     cache: C,
     tracker: T,
     client: Client,
@@ -68,6 +46,7 @@ struct RangeableDownloader<C, T>{
 
 ///单线程不可续传下载器
 struct UnRangeableDownloader<C, T>{
+    url: Url,
     cache: C,
     tracker: T,
     client: Client,
@@ -104,7 +83,6 @@ impl DownloadError {
     fn retryable(&self) -> bool {
         match self {
             DownloadError::NetworkError(_) => true,
-
             _ => false,
         }
     }
@@ -135,24 +113,9 @@ async fn send_first_request(client: Client, url: &str, headers: &HeaderMap) -> D
     Ok(response)
 }
 
-impl<C, T, H> UrlDownloader<C, T, H> 
-where C: Cacher, T: TrackerBuilder 
-{
-    fn from_downloadinfo(info: DonwloadInfo, cache: C, tracker_builder: T) -> Self {
-        Self {
-            client: info.client,
-            inner: Arc::new(DownloadRef {
-                url: info.finaly_url,
-                cache,
-                tracker_builder,
-                headers: info.headers,
-                blocks: RwLock::new(vec![]),
-                connection: AtomicU16::new(0),
-            }),
-            tasks: JoinSet::new(),
-        }
-    }
 
+impl UrlDownloader 
+{
     pub fn blocks(&self) -> &RwLock<Vec<Box<Block<T::Output>>>>{
         &self.inner.blocks
     }
@@ -179,22 +142,6 @@ where C: Cacher, T: TrackerBuilder
         }
     }
 
-    fn blocks_pending(&self) -> u16 {
-        self.inner.blocks_pending.load(Ordering::Acquire)
-    }
-
-    fn blocks_running(&self) -> u16 {
-        self.inner.blocks_running.load(Ordering::Acquire)
-    }
-
-    fn block_done(&self) -> u16 {
-        self.inner.block_done.load(Ordering::Acquire)
-    }
-
-    fn connection(&self) -> u16 {
-        self.inner.connection.load(Ordering::Acquire)
-    }
-
     ///频繁调用此方法是低效的
     fn downloaded(&self) -> u64 {
         self.inner.blocks.read().iter().map(|block| block.process() - block.start).sum()
@@ -213,30 +160,74 @@ where C: Cacher, T: TrackerBuilder
     fn num_tasks(&self) -> usize{
         self.tasks.len()
     }
+}
 
-    ///返回已创建的连接数
-    fn active_connections(&self) -> u16 {
-        self.inner.connection.load(Ordering::Acquire)
+enum Guard<T, N> {
+    Some(T),
+    Future(N),
+}
+
+impl<T, N> Guard<T, N> 
+where N: Future<Output = T> {
+    async fn get(self) -> T {
+        match self {
+            Guard::Some(some) => some,
+            Guard::Future(future) => future.await,
+        }
     }
 }
 
-
 ///定义需要在tokio中运行的方法
-impl<C: Cacher, T: TrackerBuilder, H: FnMut(&HeaderMap)> DownloadRef<C, T, H> {
-
-    async fn start_block(self: Arc<Self>, client: Client, block: RunningGuard<C, T::Output>) -> DownloadResult<()> {                      
-        let response = client.get(&self.url)
-            .headers(self.headers.clone())
-            //.header(RANGE, format!("bytes={}-{}", block.process.load(Ordering::Acquire), block.end - 1))
-            .header(RANGE, headers::Range::bytes(block.process.load(Ordering::Acquire)..block.end).unwrap())
-            .send()
-            .await?;
-        self.download_block(response, block).await
+impl DownloadRef
+{
+    ///只添加信号量空闲令牌
+    pub fn add_pre();
+    
+    ///通过凭空创建信号量通行证立即分配任务
+    pub fn add_tasks(self: &Arc<Self>, block: Block<T::Output>) {
+        self.blocks.write().push(Box::new(block));
     }
 
-    ///获取response返回的字节流
-    async fn download_block(self: Arc<Self>, response: Response, block: RunningGuard<C, T::Output>) -> DownloadResult<()>{
-        //BlockGuard的生命周期必须小于Arc<Self>
+    ///信号量有空闲时，启动下载任务
+    pub async fn download_check(self: &Arc<Self>, client: Client, guard: Guard<T, N>){
+        let sem = self.semaphore.acquire().await.expect("msg");
+        self.tasks.spawn(self.clone().download_check(client));
+        let block: &Block<_> = todo!("添加切块逻辑");
+        self.download_block(client, block, Some(sem), None).await?;
+    }
+
+    ///尝试多次下载，非致命错误会重试
+    pub async fn download_block<T,N>(self: Arc<Self>, client: Client, block:&'static Block<_> , guard: Guard<T, N>, first_response: Option<Response>) -> DownloadResult<()>
+    where N: Future<Output = T>,
+    {
+        let _guard = guard.get().await;
+        loop {
+            // let response = match first_response {
+            //     Some(r) => r,
+            //     None => {
+            //         let mut req = Request::new(Method::GET, self.url.clone());
+            //         self.headers_builder(req.headers_mut());
+            //         client.execute(req).await?
+            //     }
+            // };
+            self.download_once(&client, block, first_response).await?
+            first_response = None;
+        }
+    }
+
+    ///尝试进行一次下载，可能你返回错误
+    #[inline]
+    async fn download_once(self: &Arc<Self>, client: &Client, block: &'static Block<_>, first_response: Option<Response>>) -> DownloadResult<()>{
+        
+        let response = match first_response {
+            Some(r) => r,
+            None => {
+                let mut req = Request::new(Method::GET, self.url.clone());
+                self.headers_builder(req.headers_mut());
+                client.execute(req).await?
+            }
+        };
+        
         block.on_receiving();
         let mut writer= self.cache.write_at(SeekFrom::Start(block.start)).await;
 
@@ -252,24 +243,24 @@ impl<C: Cacher, T: TrackerBuilder, H: FnMut(&HeaderMap)> DownloadRef<C, T, H> {
                 block.process.store(block.end, Ordering::Release);
 
                 block.tracker.fetch_add(block.end - process).await;
-                self.tracker_builder.fetch_add((block.end - process) as u32).await;
+                self.controler.fetch_add(block.end - process as u32).await;
                 break;
             }
             writer.down_write(chunk.as_ref()).await?;
             block.process.store(process, Ordering::Release);
             
             block.tracker.fetch_add(chunk_size as u32).await;
-            self.tracker_builder.fetch_add(chunk_size as u32).await;
-        };
+            self.controler.fetch_add(chunk_size as u32).await;
+        }
         Ok(())
     }
+
 }
 
 
 ///可续传单线程下载器
 impl<C: Cacher,T: Tracker> RangeableDownloader<C, T> {
     async fn download(&self, response:Response) {
-        //let range = format!("bytes={}-", self.process.load(Ordering::Acquire));
         let stream = response.bytes_stream();
         let mut writer = self.cache.write_at(SeekFrom::Start(self.process.load(Ordering::Acquire))).await;
         //let mut tracker = self.tracker_builder.build_tracker();
@@ -359,7 +350,12 @@ impl CheckType {
 
 ///转换普通引用为静态引用
 unsafe fn to_static<'a, T>(t: &'a T) -> &'static T {
-    &*(t as *const T)
+    //&*(t as *const T)
+    std::mem::transmute(t)
+}
+
+unsafe fn to_static_pre(t: SemaphorePermit<'_>) -> SemaphorePermit<'static> {
+    std::mem::transmute(t)
 }
 
 pub struct Block<T>{
@@ -371,20 +367,6 @@ pub struct Block<T>{
     abort_handle: Option<AbortHandle>
 }
 
-// struct TaskState<T> {
-//     state: AtomicU8,
-//     task_info: MaybeUninit<TaskInfo<T>>,
-// }
-// ///用于记录任务信息
-// struct TaskInfo<T> {
-//     abort_handle: AbortHandle,
-//     //tracker: T,
-// }
-
-struct RunningGuard<C, T>{
-    downloader: Arc<DownloadRef<C, T>>,
-    block: &'static Block,
-}
 
 impl<T: Tracker> Block<T> {
     pub fn new(start: u64, process: u64, end: u64) -> Self{
@@ -392,7 +374,7 @@ impl<T: Tracker> Block<T> {
             start,
             process: AtomicU64::new(process), 
             end,
-            state: AtomBlockState::pending(),
+            state: AtomBlockState::waiting(),
             tracker:
             //task_info: MaybeUninit::uninit(),
             //abort_handle: MaybeUninit::uninit(),
@@ -434,56 +416,6 @@ impl<T: Tracker> Block<T> {
 }
 
 
-impl<C, T> RunningGuard<C, T> {
-
-    unsafe fn new(block: &Block, downloader: Arc<DownloadRef<C, T>>) -> Self {
-        downloader.blocks_running.fetch_add(1, Ordering::Release);
-        downloader.blocks_pending.fetch_sub(1, Ordering::Release);
-        block.set_state(BlockState::Requesting);
-        block.task_info.write(TaskInfo { abort_handle: (), tracker: () });
-        Self {
-            downloader,
-            block: to_static(block),
-        }
-    }
- 
-    fn on_receiving(&self) {
-        self.block.set_state(BlockState::Receving);
-        self.downloader.connection.fetch_add(1, Ordering::Release);
-    }
-}
-
-impl<C, T> Drop for RunningGuard<C, T> {
-    fn drop(&mut self) {
-        //let block = unsafe{&*self.block};
-        //debug_assert!(self.block.running());
-        if self.block.state() == BlockState::Receving{
-            self.downloader.connection.fetch_sub(1, Ordering::Release);
-        }
-        self.downloader.blocks_running.fetch_sub(1, Ordering::Release);
-
-
-        if self.block.process_done(){
-            self.block.set_state(BlockState::Done);
-            self.downloader.block_done.fetch_add(1, Ordering::Release);
-        } else {
-            self.block.set_state(BlockState::Pending);
-            self.downloader.blocks_pending.fetch_add(1, Ordering::Release);
-        }
-        unsafe {
-            self.block.task_info.assume_init_drop();
-            self.block.task_info
-        }
-    }
-}
-
-impl<C, T> Deref for RunningGuard<C, T>{
-    type Target = Block;
-    fn deref(&self) -> &Self::Target {
-        self.block
-    }
-}
-
 
 pub enum BlockState {
     Pending,//待办
@@ -492,16 +424,9 @@ pub enum BlockState {
     Done,//已完成
 }
 
-///私有状态
-enum InnerState{
-    Pending,
-    Requesting,
-    Receiving,
-    Done,
-}
 
 struct AtomBlockState{
-    pub(crate) state:AtomicU8,
+    pub(crate) state: AtomicU8,
     abort_handle: MaybeUninit<AbortHandle>,
 }
 
@@ -515,7 +440,6 @@ impl BlockState {
 }
 
 impl AtomBlockState {
-
     pub fn get(&self) -> BlockState{
         match self.state.load(Ordering::Acquire) {
             0 => BlockState::Pending,
@@ -546,7 +470,7 @@ impl AtomBlockState {
         self.state.store(2, Ordering::Release);
     }
 
-    fn set_pending(&mut self) {
+    fn set_waiting(&mut self) {
         debug_assert!(self.get().is_running());
         self.state.store(0, Ordering::Release);
         unsafe {
@@ -580,7 +504,7 @@ impl AtomBlockState {
         }
     }
 
-    fn pending() -> Self{
+    fn waiting() -> Self{
         Self::new(BlockState::Pending)
     }
 

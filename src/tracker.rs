@@ -32,6 +32,15 @@ impl Tracker for AtomicTracker {
     }
 }
 
+pub struct NilTrackerBuilder();
+
+impl TrackerBuilder for NilTrackerBuilder {
+    type Output = NilTracker;
+    fn build_tracker(&self) -> Self::Output {
+        NilTracker()
+    }
+}
+
 pub struct NilTracker();
 
 impl Tracker for NilTracker {
@@ -48,6 +57,7 @@ struct TracherHList<H, T>{
 struct Nil();
 
 impl Tracker for Nil {
+    #[inline(always)]
     async fn fetch_add(&self, len: u32) {
         // do nothing
     }
@@ -115,8 +125,8 @@ impl_process_tuple!(T1);
 impl_process_tuple!(T1, T2);
 
 
-///
-impl<T: Tracker> Tracker for &T {
+///为&dyn T实现Tracker trait
+impl<T: Tracker + ?Sized> Tracker for &T {
     async fn fetch_add(&self, len: u32) {
         (*self).fetch_add(len).await;
     }
