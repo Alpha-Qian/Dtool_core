@@ -2,7 +2,7 @@ use std::{sync::atomic::{AtomicU64, Ordering}};
 
 
 pub trait Tracker {
-    async fn fetch_add(&self, len: u32);
+    async fn record(&self, len: u32);
 }
 
 pub trait TrackerBuilder{
@@ -27,15 +27,24 @@ impl AtomicTracker {
 }
 
 impl Tracker for AtomicTracker {
-    async fn fetch_add(&self, len: u32) {
+    async fn record(&self, len: u32) {
         self.len.fetch_add(len as u64, Ordering::Release);
+    }
+}
+
+pub struct NilTrackerBuilder();
+
+impl TrackerBuilder for NilTrackerBuilder {
+    type Output = NilTracker;
+    fn build_tracker(&self) -> Self::Output {
+        NilTracker()
     }
 }
 
 pub struct NilTracker();
 
 impl Tracker for NilTracker {
-    async fn fetch_add(&self, len: u32) {}
+    async fn record(&self, len: u32) {}
 }
 
 
@@ -48,15 +57,16 @@ struct TracherHList<H, T>{
 struct Nil();
 
 impl Tracker for Nil {
-    async fn fetch_add(&self, len: u32) {
+    #[inline(always)]
+    async fn record(&self, len: u32) {
         // do nothing
     }
 }
 
 impl <T: Tracker, H: Tracker> Tracker for TracherHList<T, H> {
-    async fn fetch_add(&self, len: u32) {
-        self.head.fetch_add(len).await;
-        self.tail.fetch_add(len).await;
+    async fn record(&self, len: u32) {
+        self.head.record(len).await;
+        self.tail.record(len).await;
     }
 }
 
@@ -101,10 +111,10 @@ macro_rules! impl_process_tuple {
     ($($t:ident),*) => {
         // 生命周期 'a 确保引用有效性，T 需实现 A
         impl<'a, $($t: Tracker + 'a),*> Tracker for ($(&'a $t,)*) {
-            async fn fetch_add(&self, len: u32) {
+            async fn record(&self, len: u32) {
                 // 解构元组，直接调用不可变引用的方法
                 let ($(ref $t,)*) = *self;
-                $($t.fetch_add(len).await;)*
+                $($t.record(len).await;)*
             }
         }
     };
@@ -115,10 +125,10 @@ impl_process_tuple!(T1);
 impl_process_tuple!(T1, T2);
 
 
-///
-impl<T: Tracker> Tracker for &T {
-    async fn fetch_add(&self, len: u32) {
-        (*self).fetch_add(len).await;
+///为&dyn T实现Tracker trait
+impl<T: Tracker + ?Sized> Tracker for &T {
+    async fn record(&self, len: u32) {
+        (*self).record(len).await;
     }
 }
 #[cfg(test)]

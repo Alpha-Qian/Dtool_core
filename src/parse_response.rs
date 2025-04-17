@@ -2,13 +2,9 @@ use std::borrow::Cow;
 use std::borrow::Borrow;
 
 ///解析reqwest的Response
-/// 
-/// 
-///
-/// 
 use headers::ContentRange;
 use reqwest::Response;
-use reqwest::Client
+use reqwest::Client;
 use reqwest::header::HeaderValue;
 
 use reqwest::header::CONTENT_RANGE;
