@@ -114,7 +114,9 @@ pub(crate) async fn download_block<T, E, E1, E2, C>(//不如作为单独的函�
     headers_builder: impl FnOnce(&mut HeaderMap),
     client: &Client,
     cache: &C,
-    block: &Block,
+    //block: &Block,
+    process: &AtomicU64,
+    end: Option<&u64>,
     first_response: Option<Response>,//这里假设了block是对应first_response的范围
     tracker: &T,
     hand_result: E,
@@ -124,18 +126,20 @@ where
     T: Tracker,
     C: Cacher,
 {   
-    let mut process = block.process.load(Ordering::Acquire);
-    let mut writer = cache.write_at(SeekFrom::Start(process)).await;
+    let mut process_now = process.load(Ordering::Acquire);
+    let mut writer = cache.write_at(SeekFrom::Start(process_now)).await;
     loop {
         let result: reqwest::Result<()> = 'inner: {
 
             let response = match first_response {
                 Some(r) => r,
                 None => {
-                    let mut req = Request::new(Method::GET, self.url.clone());
-                    req.headers_mut().typed_insert(Range::bytes(
-                        process..block.end,
-                    ).expect("Range header error"));
+                    let mut req = Request::new(Method::GET, url.clone());
+                    let range = match end {
+                        Some(e) => Range::bytes(process_now..*e).expect("msg"),
+                        None => Range::bytes(process_now..).expect("msg"),
+                    };
+                    req.headers_mut().typed_insert(range);
                     headers_builder(req.headers_mut());
                     try_break!(client.execute(req).await, 'inner)
                 }
@@ -147,14 +151,16 @@ where
                 let chunk_size = chunk.len();
 
                 let _guard = //block_guard(block);
-                if process + chunk_size as u64 > block.end {
-                    writer.down_write(&chunk[..(block.end - process) as usize]).await?;
-                    block.process.store(block.end, Ordering::Release);
-                    tracker.record((block.end - process) as u32).await;
-                    break;
+                if let Some(e) = end{
+                    if process_now + chunk_size as u64 > *e {
+                        writer.down_write(&chunk[..(*e - process_now) as usize]).await?;
+                        process.store(*e, Ordering::Release);
+                        tracker.record((*e - process_now) as u32).await;
+                        break;
+                    };
                 };
                 writer.down_write(chunk.as_ref()).await?;
-                block.process.store(process, Ordering::Release);
+                process.store(process_now, Ordering::Release);
                 tracker.record(chunk_size as u32).await;
             }
             Ok(())
