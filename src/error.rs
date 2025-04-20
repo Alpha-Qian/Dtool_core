@@ -2,12 +2,21 @@ use thiserror::Error;
 use reqwest::Response;
 
 
+
 #[derive(Error, Debug)]
-enum DownloadError {
+enum DownloadError<T> {
     #[error("")]
     ReqwestEorror(#[from] reqwest::Error),
+    #[error("写入相关错误{:?}",.0)]
+    WriteError(#[from] WriteError<T>),
+    #[error("不是范围请求")]
+    NoPartialResponseError,
     #[error("")]
-    FileChangedError(Response),//使用if-range请求头，返回状态码为200的响应，而不是206
-    #[error("")]
-    Other,
+    FileChangedError(#[from] FileChangedError),
+}
+
+///
+#[derive(Debug)]
+struct WriteError<T>{
+    inner: T
 }

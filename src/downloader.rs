@@ -1,5 +1,5 @@
 //use std::io::SeekFrom;
-use std::{future::Future, io::SeekFrom, mem::{transmute, transmute_copy, MaybeUninit}, ops::Deref, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}};
+use std::{future::Future, io::SeekFrom, mem::{transmute, transmute_copy, MaybeUninit}, ops::Deref, path::Iter, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}};
 use thiserror::Error;
 use headers::{self,
     HeaderMapExt,
@@ -9,22 +9,13 @@ use reqwest::{
         self, HeaderMap,HeaderValue, IF_MATCH, IF_RANGE, RANGE
     }, Client, Method, Request, RequestBuilder, Response, Url
 };
-use parking_lot::{
-    RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+
 use futures::stream::StreamExt;
 use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
-use crate::{cache, tracker};
 
 use crate::cache::{Writer, Cacher};
-use crate::tracker::{Tracker, TrackerBuilder};
+use crate::tracker::Tracker;
 use futures;
-
-pub struct DownloadRef<C>{
-    url: Url,
-    cache: C,
-}
-
 
 struct DonwloadInfo{  
     finaly_url: String,
@@ -51,16 +42,6 @@ enum DownloadError {
     NetworkError(#[from] reqwest::Error),
     SeverFileChanged,
 }
-
-impl DownloadError {
-    fn retryable(&self) -> bool {
-        match self {
-            DownloadError::NetworkError(_) => true,
-            _ => false,
-        }
-    }
-}
-
 type DownloadResult<T> = Result<T, DownloadError>;
 
 impl UrlKind {
@@ -113,95 +94,101 @@ impl WithOption {
     }
 }
 
-impl<C> DownloadRef<C>
-where C: Cacher,
+pub async fn download_with_block<T, E>(
+    client: &Client,
+    block: &Block,
+    tracker: T,
+    hand_error: fn(&DownloadError) -> E,
+    headers_builder: impl FnOnce(&mut HeaderMap),
+) -> DownloadResult<()>
+where 
+    E: Future<Output = CheckError>,
+    T: Tracker,
 {
+    download_block(client, block, None, tracker, hand_error, headers_builder).await
+}
 
-    pub async fn download_with_block<T, E>(
-        &self,
-        client: &Client,
-        block: &Block,
-        tracker: T,
-        hand_error: fn(&DownloadError) -> E,
-        headers_builder: impl FnOnce(&mut HeaderMap),
-    ) -> DownloadResult<()>
-    where 
-        E: Future<Output = CheckError>,
-        T: Tracker,
-    {
-        self.download_block(client, block, None, tracker, hand_error, headers_builder).await
-    }
+///尝试多次下载，非致命错误会重试
+pub(crate) async fn download_block<T, E, E1, E2, C>(//不如作为单独的函数
+    url: &Url,
+    headers_builder: impl FnOnce(&mut HeaderMap),
+    client: &Client,
+    cache: &C,
+    block: &Block,
+    first_response: Option<Response>,//这里假设了block是对应first_response的范围
+    tracker: &T,
+    hand_result: E,
+) -> DownloadResult<()>
+where 
+    E: FnMut(&DownloadError) -> E1, E1 : Future<Output = E2>,
+    T: Tracker,
+    C: Cacher,
+{   
+    let mut process = block.process.load(Ordering::Acquire);
+    let mut writer = cache.write_at(SeekFrom::Start(process)).await;
+    loop {
+        let result: reqwest::Result<()> = 'inner: {
 
-    ///尝试多次下载，非致命错误会重试
-    pub(crate) async fn download_block<T, E, E1, E2, C>(//不如作为单独的函数
-        &self,
-        url: &Url,
-        headers_builder: impl FnOnce(&mut HeaderMap),
-        client: &Client,
-        cache: &C,
-        block: &Block,
-        first_response: Option<Response>,//这里假设了block是对应first_response的范围
-        tracker: &T,
-        hand_result: E,
-    ) -> DownloadResult<()>
-    where 
-        E: FnMut(&DownloadError) -> E1, E1 : Future<Output = E2>,
-        T: Tracker,
-        C: Cacher,
-    {   
-        let mut process = block.process.load(Ordering::Acquire);
-        let mut writer = self.cache.write_at(SeekFrom::Start(process)).await;
-        loop {
-            let result: Result<(), DownloadError> = 'inner: {
-                //retery
-                let response = match first_response {
-                    Some(r) => r,
-                    None => {
-                        let mut req = Request::new(Method::GET, self.url.clone());
-                        req.headers_mut().typed_insert(Range::bytes(
-                            process..block.end,
-                        ).expect("Range header error"));
-                        headers_builder(req.headers_mut());
-                        try_break!(client.execute(req).await, 'inner)
-                    }
-                };
-                //reciving_guard
-                let mut stream = response.bytes_stream();
-                while let Some(item) = stream.next().await{
-                    let chunk = try_break!(item, 'inner);
-                    let chunk_size = chunk.len();
-
-                    let _guard = //block_guard(block);
-                    if process + chunk_size as u64 > block.end {
-                        writer.down_write(&chunk[..(block.end - process) as usize]).await?;
-                        block.process.store(block.end, Ordering::Release);
-                        tracker.record((block.end - process) as u32).await;
-                        break;
-                    };
-                    writer.down_write(chunk.as_ref()).await?;
-                    block.process.store(process, Ordering::Release);
-                    tracker.record(chunk_size as u32).await;
+            let response = match first_response {
+                Some(r) => r,
+                None => {
+                    let mut req = Request::new(Method::GET, self.url.clone());
+                    req.headers_mut().typed_insert(Range::bytes(
+                        process..block.end,
+                    ).expect("Range header error"));
+                    headers_builder(req.headers_mut());
+                    try_break!(client.execute(req).await, 'inner)
                 }
-                Ok(())
             };
-            let finally_result = todo!("handing result");//handing result
-            let a = panic!();
-            finally_result
+            //reciving_guard
+            let mut stream = response.bytes_stream();
+            while let Some(item) = stream.next().await{
+                let chunk = try_break!(item, 'inner);
+                let chunk_size = chunk.len();
 
-            // let response = match first_response {
-            //     Some(r) => r,
-            //     None => {
-            //         let mut req = Request::new(Method::GET, self.url.clone());
-            //         self.headers_builder(req.headers_mut());
-            //         client.execute(req).await?
-            //     }
-            // }; 
-            // first_response = None;
-            // let mut writer = self.cache.write_at(SeekFrom::Start(block.process.load(Ordering::Acquire))).await;
-            // let result = self.download_once(&client, block, response, &tracker).await;
-            // result?;
+                let _guard = //block_guard(block);
+                if process + chunk_size as u64 > block.end {
+                    writer.down_write(&chunk[..(block.end - process) as usize]).await?;
+                    block.process.store(block.end, Ordering::Release);
+                    tracker.record((block.end - process) as u32).await;
+                    break;
+                };
+                writer.down_write(chunk.as_ref()).await?;
+                block.process.store(process, Ordering::Release);
+                tracker.record(chunk_size as u32).await;
+            }
+            Ok(())
+        };
+        match result {
+            Ok(_) => {
+                if block.process_done() {
+                    break Ok(());
+                } else {
+                    break Err(DownloadError::WriteError());
+                }
+            }
+            Err(e) => {
+                e.is_connect()
+            }
         }
+        let finally_result = todo!("handing result");//handing result
+        let a = panic!();
+        finally_result
+
+        // let response = match first_response {
+        //     Some(r) => r,
+        //     None => {
+        //         let mut req = Request::new(Method::GET, self.url.clone());
+        //         self.headers_builder(req.headers_mut());
+        //         client.execute(req).await?
+        //     }
+        // }; 
+        // first_response = None;
+        // let mut writer = self.cache.write_at(SeekFrom::Start(block.process.load(Ordering::Acquire))).await;
+        // let result = self.download_once(&client, block, response, &tracker).await;
+        // result?;
     }
+}
 
     // ///尝试进行一次下载，可能返回错误
     // #[inline]
@@ -240,7 +227,7 @@ where C: Cacher,
     //     Ok(())
     // }
 
-}
+
 
 
 ///可续传单线程下载器
@@ -315,23 +302,41 @@ impl CheckType {
 
 
 pub struct Block{
-    start: u64,
     process: AtomicU64,
     end: u64,
-    //state: AtomBlockState,
+}
+struct BlockIter{
+    remainnum: u8,
+    process: u64,
+    end: u64,
+    chunk_size:u64,
+}
+impl Iterator for BlockIter{
+    type Item = Block;
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
 }
 
 
 impl Block {
-    pub fn new(start: u64, process: u64, end: u64) -> Self{
+    pub fn new(process: u64, end: u64) -> Self{
         Block{
-            start,
             process: AtomicU64::new(process), 
             end,
-            state: AtomBlockState::waiting(),
         }
     }
 
+    pub fn splits(&mut self, num: u8) -> BlockIter{
+        
+
+        BlockIter{
+            remainnum: num,
+            process: self.process.load(Ordering::Acquire),
+            end: self.end,
+            chunk_size: (self.end - self.process.load(Ordering::Acquire)) / num as u64,
+        }
+    }
     pub fn process(&self) -> u64 {
         self.process.load(Ordering::Acquire)
     }
@@ -339,27 +344,9 @@ impl Block {
     pub fn end(&self) -> u64 {
         self.end
     }
-
-    pub fn state(&self) -> BlockState {
-        self.state.get()
-    }
-
-    pub fn downloaded(&self) -> u64 {
-        self.process.load(Ordering::Acquire) - self.start
-    }
-
     pub fn remaining(&self) -> u64 {
         self.end - self.process.load(Ordering::Acquire)
     }
-    
-    pub(crate) fn set_state(&self, state: BlockState) {
-        self.state.set(state)
-    }
-
-    pub fn running(&self) -> bool {
-        self.state.running()
-    }
-
     pub(crate) fn process_done(&self) -> bool{
         debug_assert!(self.process.load(Ordering::Acquire) <= self.end);
         self.process.load(Ordering::Acquire) == self.end
