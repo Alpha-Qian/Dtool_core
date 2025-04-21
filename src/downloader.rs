@@ -100,14 +100,16 @@ enum ResponseRange{
 }
 ///尝试可续传链接的多次下载，非致命错误会重试
 #[inline]
-pub(crate) async fn download_block<T, C>(//不如作为单独的函数
+pub(crate) async unsafe  fn download_block<T, C>(//不如作为单独的函数
     url: &Url,
     headers_builder: impl FnOnce(&mut HeaderMap),
     client: &Client,
     cache: &C,
     process_now: u64,//进度
-    process: Option<&AtomicU64>,//是否使用原子变量同步
-    end: Option<&u64>,//是否提前结束
+
+    process: Option<*const AtomicU64>,//是否使用原子变量同步
+    end: Option<*const u64>,//是否提前结束
+
     first_response: Option<Response>,//这里假设了block是对应first_response的范围
     tracker: &T,
 ) -> DownloadResult<()>
@@ -142,18 +144,25 @@ where
                 let chunk_size = chunk.len();
 
                 let _guard = //block_guard(block);
+
                 if let Some(e) = end{
+                    //Safety: e is a pointer to a u64, and we are transmuting it to a mutable reference to u64.
+                    let e = unsafe { &*e };
                     if process_now + chunk_size as u64 > *e {
                         writer.down_write(&chunk[..(*e - process_now) as usize]).await?;
                         process_now += *e - process_now;
-                        if let Some(p) = process { p.store(*e, Ordering::Release) }
+                        if let Some(p) = process { unsafe {
+                            (*p).store(*e, Ordering::Release)
+                        } }
                         tracker.record((*e - process_now) as u32).await;
                         break;
                     };
                 };
                 writer.down_write(chunk.as_ref()).await?;
                 process_now += chunk_size as u64;
-                if let Some(p) = process { p.store(process_now, Ordering::Release) }
+                if let Some(p) = process { unsafe {
+                    (*p).store(process_now, Ordering::Release)
+                } }
                 tracker.record(chunk_size as u32).await;
             }
             Ok(())
