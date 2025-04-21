@@ -95,8 +95,8 @@ type ResponseCheker = fn(&Response) -> Result<(), DownloadError>;
 type ResultHander = fn(reqwest::Result<()>) -> DownloadResult<()>;
 
 enum ResponseRange{
-    first_response(Response),
-    range{start: u64, end: Option<u64>},
+    Response(Response),//从response中解析进度和结束位置
+    Range{start: &mut u64, end: Option<&u64>},//当前进度和是否提前结束
 }
 ///尝试可续传链接的多次下载，非致命错误会重试
 #[inline]
