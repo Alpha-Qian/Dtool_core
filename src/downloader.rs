@@ -17,6 +17,7 @@ use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
 use crate::cache::{Writer, Cacher};
 use crate::tracker::Tracker;
 use futures;
+use parking_lot::Mutex;
 
 struct DonwloadInfo{  
     finaly_url: String,
@@ -148,7 +149,7 @@ pub(crate) async unsafe fn download_block(//不如作为单独的函数
                         if let Some(shared_process) = shared_process {
                             shared_process.as_ref().store(*end.as_ref(), Ordering::Release)
                         }
-                        tracker.record((*end.as_ref() - process) as u32).await;
+                        tracker.record((*end.as_ref() - process) as u32, process).await;
                         break;
                     };
                 };
@@ -158,7 +159,7 @@ pub(crate) async unsafe fn download_block(//不如作为单独的函数
                 if let Some(p) = shared_process {
                     p.as_ref().store(process, Ordering::Release)
                 }
-                tracker.record(chunk_size as u32).await;
+                tracker.record(chunk_size as u32, process).await;
             }
             Ok(())
         };

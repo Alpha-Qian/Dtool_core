@@ -2,7 +2,7 @@ use std::{sync::atomic::{AtomicU64, Ordering}};
 
 
 pub trait Tracker {
-    async fn record(&self, len: u32);
+    async fn record(&self, len: u32, process: u64);
 }
 
 pub trait TrackerBuilder{
@@ -27,7 +27,7 @@ impl AtomicTracker {
 }
 
 impl Tracker for AtomicTracker {
-    async fn record(&self, len: u32) {
+    async fn record(&self, len: u32, process: u64) {
         self.len.fetch_add(len as u64, Ordering::Release);
     }
 }
@@ -44,7 +44,7 @@ impl TrackerBuilder for NilTrackerBuilder {
 pub struct NilTracker();
 
 impl Tracker for NilTracker {
-    async fn record(&self, len: u32) {}
+    async fn record(&self, len: u32, process: u64) {}
 }
 
 
@@ -58,15 +58,15 @@ struct Nil();
 
 impl Tracker for Nil {
     #[inline(always)]
-    async fn record(&self, len: u32) {
+    async fn record(&self, len: u32, process: u64) {
         // do nothing
     }
 }
 
 impl <T: Tracker, H: Tracker> Tracker for TracherHList<T, H> {
-    async fn record(&self, len: u32) {
-        self.head.record(len).await;
-        self.tail.record(len).await;
+    async fn record(&self, len: u32, process: u64) {
+        self.head.record(len, process: u64).await;
+        self.tail.record(len, process: u64).await;
     }
 }
 
@@ -111,10 +111,10 @@ macro_rules! impl_process_tuple {
     ($($t:ident),*) => {
         // 生命周期 'a 确保引用有效性，T 需实现 A
         impl<'a, $($t: Tracker + 'a),*> Tracker for ($(&'a $t,)*) {
-            async fn record(&self, len: u32) {
+            async fn record(&self, len: u32, process: u64) {
                 // 解构元组，直接调用不可变引用的方法
                 let ($(ref $t,)*) = *self;
-                $($t.record(len).await;)*
+                $($t.record(len, process).await;)*
             }
         }
     };
@@ -127,8 +127,8 @@ impl_process_tuple!(T1, T2);
 
 ///为&dyn T实现Tracker trait
 impl<T: Tracker + ?Sized> Tracker for &T {
-    async fn record(&self, len: u32) {
-        (*self).record(len).await;
+    async fn record(&self, len: u32, process: u64) {
+        (*self).record(len, process).await;
     }
 }
 #[cfg(test)]
