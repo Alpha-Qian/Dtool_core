@@ -9,7 +9,7 @@ pub trait Cacher {
 }
 
 pub trait Writer {
-    async fn down_write(&mut self, buf: &[u8]) -> std::io::Result<()>;
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()>;
 }
 
 pub trait Reader {
@@ -21,13 +21,13 @@ struct TokioIo<T>(T);
 struct AsyncstdIo<T>(T);
 
 impl<T:Write> Writer for StdIo<T> {
-    async fn down_write(&mut self, buf: &[u8]) -> std::io::Result<()> {
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.0.write_all(buf)
     }
 }
 
 impl<T:AsyncWriteExt + std::marker::Unpin> Writer for TokioIo<T> {
-    async fn down_write(&mut self, buf: &[u8]) -> std::io::Result<()> {
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.0.write_all(buf).await
     }
 }
@@ -66,7 +66,7 @@ mod tests {
         // We still need an async context to call it.
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
-            let result = stdio_writer.down_write(data_to_write).await;
+            let result = stdio_writer.write_all(data_to_write).await;
             assert!(result.is_ok());
         });
 
@@ -82,7 +82,7 @@ mod tests {
         let mut tokio_writer = TokioIo(&mut buffer);
         let data_to_write = b"hello tokio";
 
-        let result = tokio_writer.down_write(data_to_write).await;
+        let result = tokio_writer.write_all(data_to_write).await;
         assert!(result.is_ok());
 
         // Verify the data was written

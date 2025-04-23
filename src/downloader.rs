@@ -1,13 +1,14 @@
 //use std::io::SeekFrom;
-use std::{future::Future, io::SeekFrom, mem::{transmuteMaybeUninit},sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}, time::Duration};
+use std::{future::Future, io::SeekFrom, mem::{transmute,MaybeUninit}, os::windows::process, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}, time::Duration};
 use thiserror::Error;
+use std::ptr::NonNull;
 use headers::{self,
     HeaderMapExt,
     Range};
 use reqwest::{
     self, header::{
         self, HeaderMap,HeaderValue, IF_MATCH, IF_RANGE, RANGE
-    }, Client, Method, Request, Response, Url, Version
+    }, Client, Method, Request, Response, StatusCode, Url, Version
 };
 
 use futures::stream::StreamExt;
@@ -23,6 +24,19 @@ struct DonwloadInfo{
     headers: HeaderMap,
     client: Client,
     response: Response,
+}
+
+struct FirstResponse{
+    response: Response,
+    rangeable: bool,
+}
+
+impl FirstResponse {
+    async fn new(url: Url, headers: HeaderMap, client: Client) -> Self {
+        Self {
+            response,
+        }
+    }
 }
 
 enum UrlKind {
@@ -73,52 +87,33 @@ macro_rules! try_break {
     };
 }
 
-enum WithOption{
-    Response(Response, Block),
-    Block(Block),
-}
-
-impl WithOption {
-    fn with_block(block: Block) -> Self {
-        Self::Block(block)
-    }
-    
-    fn with_response(response: Response) -> Self {
-        Self::Response(response, block)
-    }
-}
-
-
-
-type RequestBuilder = fn(&mut HeaderMap, &mut Option<Duration>, Option<Version>);
+type RequestBuilder = fn(&mut HeaderMap, &mut Option<Duration>, &mut Option<Version>);
 type ResponseCheker = fn(&Response) -> Result<(), DownloadError>;
 type ResultHander = fn(reqwest::Result<()>) -> DownloadResult<()>;
 
-enum ResponseRange{
-    Response(Response),//从response中解析进度和结束位置
-    Range{start: &mut u64, end: Option<&u64>},//当前进度和是否提前结束
-}
 ///尝试可续传链接的多次下载，非致命错误会重试
+/// 遵守以下规则以保证不会发生未定义行为：
+///  1.shared_process和end参数必须在调用获取锁闭包后可用
+/// 遵守以下规则以保证不会发生错误的行为：
+///  1.process参数必须正确对应response范围响应的起始位置
+///  2.end参数必须不能超过对应response范围响应的终止位置
+///  3.
 #[inline]
-pub(crate) async unsafe  fn download_block<T, C>(//不如作为单独的函数
+pub(crate) async unsafe fn download_block(//不如作为单独的函数
     url: &Url,
     headers_builder: impl FnOnce(&mut HeaderMap),
     client: &Client,
-    cache: &C,
-    process_now: u64,//进度
+    cache: &impl Cacher,
+    tracker: &impl Tracker,
 
-    process: Option<*const AtomicU64>,//是否使用原子变量同步
-    end: Option<*const u64>,//是否提前结束
+    process: u64,//进度
+    shared_process: Option<NonNull<AtomicU64>>,//可选的，是否使用原子变量同步
+    end: Option<NonNull<u64>>,//可选的，是否提前结束
 
     first_response: Option<Response>,//这里假设了block是对应first_response的范围
-    tracker: &T,
 ) -> DownloadResult<()>
-where
-    T: Tracker,
-    C: Cacher,
-{   
-    //let mut process_now = process.load(Ordering::Acquire);
-    let mut writer = cache.write_at(SeekFrom::Start(process_now)).await;
+{
+    let mut writer = cache.write_at(SeekFrom::Start(process)).await;
     loop {
         let result: reqwest::Result<()> = 'inner: {
 
@@ -127,17 +122,18 @@ where
                 None => {
                     let mut req = Request::new(Method::GET, url.clone());
                     let range = match end {
-                        Some(e) => Range::bytes(process_now..*e).expect("msg"),
-                        None => Range::bytes(process_now..).expect("msg"),
+                        Some(e) => Range::bytes(process..*e.as_ptr()).expect("msg"),
+                        None => Range::bytes(process..).expect("msg"),
                     };
                     req.headers_mut().typed_insert(range);
                     headers_builder(req.headers_mut());
-                    try_break!(client.execute(req).await, 'inner)
-                    //parse response here
+                    let response = try_break!(client.execute(req).await, 'inner);
+                    assert!(response.status() == StatusCode::from_u16(206).unwrap());
+                    response
                 }
             };
 
-            //reciving_guard
+            let reciving_guard = ();//
             let mut stream = response.bytes_stream();
             while let Some(item) = stream.next().await{
                 let chunk = try_break!(item, 'inner);
@@ -145,24 +141,23 @@ where
 
                 let _guard = //block_guard(block);
 
-                if let Some(e) = end{
-                    //Safety: e is a pointer to a u64, and we are transmuting it to a mutable reference to u64.
-                    let e = unsafe { &*e };
-                    if process_now + chunk_size as u64 > *e {
-                        writer.down_write(&chunk[..(*e - process_now) as usize]).await?;
-                        process_now += *e - process_now;
-                        if let Some(p) = process { unsafe {
-                            (*p).store(*e, Ordering::Release)
-                        } }
-                        tracker.record((*e - process_now) as u32).await;
+                if let Some(end) = end{
+                    if process + chunk_size as u64 > *end.as_ref() {
+                        writer.write_all(&chunk[..(*end.as_ref() - process) as usize]).await?;
+                        process += *end.as_ref() - process;
+                        if let Some(shared_process) = shared_process {
+                            shared_process.as_ref().store(*end.as_ref(), Ordering::Release)
+                        }
+                        tracker.record((*end.as_ref() - process) as u32).await;
                         break;
                     };
                 };
-                writer.down_write(chunk.as_ref()).await?;
-                process_now += chunk_size as u64;
-                if let Some(p) = process { unsafe {
-                    (*p).store(process_now, Ordering::Release)
-                } }
+
+                writer.write_all(chunk.as_ref()).await?;
+                process += chunk_size as u64;
+                if let Some(p) = shared_process {
+                    p.as_ref().store(process, Ordering::Release)
+                }
                 tracker.record(chunk_size as u32).await;
             }
             Ok(())
@@ -177,35 +172,97 @@ where
     }//loop end
 }
 
+#[inline]
+pub(crate) async unsafe fn download_once(
+    url: &Url,
+    first_response: Option<Response>,
+    client: &Client,
+    writer: &mut impl Writer,
+    tracker: &impl Tracker,
 
+    process: &mut u64,
+    shared_process: Option<NonNull<AtomicU64>>,
+    end: Option<NonNull<u64>>
+) -> DownloadResult<()> 
+{
+    let response = match first_response {
+        Some(r) => r,
+        None => {
+            let mut req = Request::new(Method::GET, url.clone());
+            let range = match end {
+                Some(end) => Range::bytes(*process..*end.as_ref()).expect("msg"),
+                None => Range::bytes(*process..).expect("msg"),
+            };
+            req.headers_mut().typed_insert(range);
+            //headers_builder(req.headers_mut());
+            let response = client.execute(req).await?;
+            assert!(response.status() == StatusCode::from_u16(206).unwrap());
+            response
+        }
+    };
+    let reciving_guard = ();//
+    let mut stream = response.bytes_stream();
+    while let Some(item) = stream.next().await{
+        let chunk = item?;
+        let chunk_size = chunk.len();
+
+        let _guard = //block_guard(block);
+
+        if let Some(end) = end{
+            if *process + chunk_size as u64 > *end.as_ref() {
+                writer.write_all(&chunk[..(*end.as_ref() - *process) as usize]).await?;
+                *process += *end.as_ref() - *process;
+                if let Some(p) = shared_process {
+                    p.as_ref().store(*end.as_ref(), Ordering::Release)
+                }
+                tracker.record((*end.as_ref() - *process) as u32).await;
+                break;
+            };
+        };
+
+        writer.write_all(chunk.as_ref()).await?;
+        *process += chunk_size as u64;
+        if let Some(p) = shared_process {
+            p.as_ref().store(*process, Ordering::Release)
+        }
+        tracker.record(chunk_size as u32).await;
+    }
+    Ok(())
+}
+///不可续传链接的多次下载
 pub(crate) async fn download_unrangeable(
+    url: &Url,
+    client: &Client,
+    cache: &impl Cacher,
+    tracker: &impl Tracker,
+
+    process: u64,
+    shared_writed_process: Option<NonNull<AtomicU64>>,
+    shared_downloaded_process: Option<NonNull<AtomicU64>>,
+    end: Option<NonNull<u64>>,//很有可能是None
+
+    first_response: Option<Response>,
 ){
+    loop{
+        let result: reqwest::Result<()> = 'inner: {
+            let response = match first_response {
+                Some(r) => r,
+                None => {
+                    client.get(url.clone())
+                       .send()
+                       .await?
+                }
+            }
 
-}
-
-///可续传单线程下载器
-impl<C: Cacher,T: Tracker> RangeableDownloader<C, T> {
-    async fn download(&self, response:Response) {
-        let stream = response.bytes_stream();
-        let mut writer = self.cache.write_at(SeekFrom::Start(self.process.load(Ordering::Acquire))).await;
-        //let mut tracker = self.tracker_builder.build_tracker();
-        while let Some(item) = stream.next().await {
-            let chunk = item?.as_ref();
-            writer.down_write(&chunk).await?;
-            self.tracker.record(chunk.len() as u32).await;
-        }
+            let mut stream = response.bytes_stream();
+            while let Some(item) = stream.next().await{
+                let chunk = item.unwrap();
+                let chunk_size = chunk.len();
+            }
+            Ok(())
+        };
     }
 }
-
-impl<C, T> UnRangeableDownloader<C, T> {
-    async fn download(&self, from_pos: u64) {
-        self.process.store(0, Ordering::Release);
-        while let Some(chunk) = response.bytes().await? {
-            self.
-        }
-    }
-}
-
 
 enum CheckType{
     ETag(HeaderValue),
@@ -264,6 +321,7 @@ struct BlockIter{
     end: u64,
     chunk_size:u64,
 }
+
 impl Iterator for BlockIter{
     type Item = Block;
     fn next(&mut self) -> Option<Self::Item> {

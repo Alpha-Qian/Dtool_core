@@ -44,10 +44,6 @@ impl ParseResponse for Response {
         self.content_length().or(optb)
     }
 
-    fn get_file_name(&self) -> Option<String> {
-        Cow
-    }
-
 }
 
 
