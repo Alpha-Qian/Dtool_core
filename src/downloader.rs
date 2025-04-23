@@ -182,7 +182,7 @@ pub(crate) async unsafe fn download_once(
     tracker: &impl Tracker,
 
     process: &mut u64,
-    shared_process: Option<NonNull<AtomicU64>>,
+    //shared_process: Option<NonNull<AtomicU64>>,
     end: Option<NonNull<u64>>
 ) -> DownloadResult<()> 
 {
@@ -213,9 +213,6 @@ pub(crate) async unsafe fn download_once(
             if *process + chunk_size as u64 > *end.as_ref() {
                 writer.write_all(&chunk[..(*end.as_ref() - *process) as usize]).await?;
                 *process += *end.as_ref() - *process;
-                if let Some(p) = shared_process {
-                    p.as_ref().store(*end.as_ref(), Ordering::Release)
-                }
                 tracker.record((*end.as_ref() - *process) as u32).await;
                 break;
             };
@@ -223,9 +220,6 @@ pub(crate) async unsafe fn download_once(
 
         writer.write_all(chunk.as_ref()).await?;
         *process += chunk_size as u64;
-        if let Some(p) = shared_process {
-            p.as_ref().store(*process, Ordering::Release)
-        }
         tracker.record(chunk_size as u32).await;
     }
     Ok(())
