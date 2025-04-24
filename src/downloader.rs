@@ -88,6 +88,47 @@ macro_rules! try_break {
     };
 }
 
+// enum ResponseRange{
+//     Some{response: Response, process: u64, end: u64},
+//     None{process: u64, end: u64}
+// }
+
+struct ResponseRange{
+    response: Option<Response>,
+    process: u64,
+    end: Option<u64>,
+}
+
+impl ResponseRange {
+    pub fn new_none(process: u64, end: u64) -> Self {
+    }
+
+    pub fn new_some(response: Response) -> Self {
+    }
+
+    pub unsafe fn new_some_unchecked(response: Response, process: u64, end: u64) -> Self {
+
+    }
+
+    fn get_response_mut(&mut self) -> Option<&mut Response> {
+        match self {
+
+        }
+    }
+
+    fn into_parts(self) -> (Option<Response>, u64, u64) {
+        match self {
+        }
+    }
+
+}
+
+enum EndType<'a>{
+    u64(NonNull<u64>),
+    Atomicu64(&'a AtomicU64),
+    None 
+}
+
 type RequestBuilder = fn(&mut HeaderMap, &mut Option<Duration>, &mut Option<Version>);
 type ResponseCheker = fn(&Response) -> Result<(), DownloadError>;
 type ResultHander = fn(reqwest::Result<()>) -> DownloadResult<()>;
@@ -116,62 +157,13 @@ pub(crate) async unsafe fn download_block(//不如作为单独的函数
 {
     let mut writer = cache.write_at(SeekFrom::Start(process)).await;
     loop {
-        let result: reqwest::Result<()> = 'inner: {
-
-            let response = match first_response {
-                Some(r) => r,
-                None => {
-                    let mut req = Request::new(Method::GET, url.clone());
-                    let range = match end {
-                        Some(e) => Range::bytes(process..*e.as_ptr()).expect("msg"),
-                        None => Range::bytes(process..).expect("msg"),
-                    };
-                    req.headers_mut().typed_insert(range);
-                    headers_builder(req.headers_mut());
-                    let response = try_break!(client.execute(req).await, 'inner);
-                    assert!(response.status() == StatusCode::from_u16(206).unwrap());
-                    response
-                }
-            };
-
-            let reciving_guard = ();//
-            let mut stream = response.bytes_stream();
-            while let Some(item) = stream.next().await{
-                let chunk = try_break!(item, 'inner);
-                let chunk_size = chunk.len();
-
-                let _guard = //block_guard(block);
-
-                if let Some(end) = end{
-                    if process + chunk_size as u64 > *end.as_ref() {
-                        writer.write_all(&chunk[..(*end.as_ref() - process) as usize]).await?;
-                        process += *end.as_ref() - process;
-                        if let Some(shared_process) = shared_process {
-                            shared_process.as_ref().store(*end.as_ref(), Ordering::Release)
-                        }
-                        tracker.record((*end.as_ref() - process) as u32, process).await;
-                        break;
-                    };
-                };
-
-                writer.write_all(chunk.as_ref()).await?;
-                process += chunk_size as u64;
-                if let Some(p) = shared_process {
-                    p.as_ref().store(process, Ordering::Release)
-                }
-                tracker.record(chunk_size as u32, process).await;
-            }
-            Ok(())
-        };
-        match result {
-            Err(e) => {},
-            Ok(_) => {}
-        }
+        download_once(url, first_response, client, &mut writer, tracker, &mut process, end).await;
+    };
         let finally_result = todo!("handing result");//handing result
         let a = panic!();
         finally_result
-    }//loop end
 }
+
 
 #[inline]
 pub(crate) async unsafe fn download_once(
@@ -182,8 +174,7 @@ pub(crate) async unsafe fn download_once(
     tracker: &impl Tracker,
 
     process: &mut u64,
-    //shared_process: Option<NonNull<AtomicU64>>,
-    end: Option<NonNull<u64>>
+    end: EndType<'_>,
 ) -> DownloadResult<()> 
 {
     let response = match first_response {
@@ -191,8 +182,11 @@ pub(crate) async unsafe fn download_once(
         None => {
             let mut req = Request::new(Method::GET, url.clone());
             let range = match end {
-                Some(end) => Range::bytes(*process..*end.as_ref()).expect("msg"),
-                None => Range::bytes(*process..).expect("msg"),
+                EndType::u64(end) => Range::bytes(*process..*end.as_ref()).expect("msg"),
+                EndType::Atomicu64(end ) =>Range::bytes(*process..*end).expect("msg"),
+                EndType::None => Range::bytes(*process..).expect("msg"),
+                //Some(end) => Range::bytes(*process..*end.as_ref()).expect("msg"),
+                //one => Range::bytes(*process..).expect("msg"),
             };
             req.headers_mut().typed_insert(range);
             //headers_builder(req.headers_mut());
@@ -207,23 +201,30 @@ pub(crate) async unsafe fn download_once(
         let chunk = item?;
         let chunk_size = chunk.len();
 
-        let _guard = //block_guard(block);
+        let _guard = true;//block_guard(block);
 
-        if let Some(end) = end{
-            if *process + chunk_size as u64 > *end.as_ref() {
-                writer.write_all(&chunk[..(*end.as_ref() - *process) as usize]).await?;
-                *process += *end.as_ref() - *process;
-                tracker.record((*end.as_ref() - *process) as u32).await;
+        let a = match end {
+            EndType::u64(end) => Some(*end.as_ref()),
+            EndType::Atomicu64(end) => Some(end.load(Ordering::Acquire)),
+            EndType::None => None,
+        };
+
+        if let Some(end) = a{
+            if *process + chunk_size as u64 > end {
+                writer.write_all(&chunk[..(end - *process) as usize]).await?;
+                *process += end - *process;
+                tracker.record((end - *process) as u32, *process).await;
                 break;
             };
         };
 
         writer.write_all(chunk.as_ref()).await?;
         *process += chunk_size as u64;
-        tracker.record(chunk_size as u32).await;
+        tracker.record(chunk_size as u32, *process).await;
     }
     Ok(())
 }
+
 ///不可续传链接的多次下载
 pub(crate) async fn download_unrangeable(
     url: &Url,
@@ -258,6 +259,54 @@ pub(crate) async fn download_unrangeable(
         };
     }
 }
+
+
+pub(crate) async unsafe fn download_once_unrangeable(
+    url: &Url,
+    first_response: Option<Response>,
+    client: &Client,
+    writer: &mut impl Writer,
+    tracker: &impl Tracker,
+    writed_tracker: &impl Tracker,
+
+    process: &mut u64,
+    end: Option<NonNull<u64>>
+) -> DownloadResult<()> 
+{
+    let response = match first_response {
+        Some(r) => r,
+        None => {
+            let mut req = Request::new(Method::GET, url.clone());
+            //headers_builder(req.headers_mut());
+            let response = client.execute(req).await?;
+            assert!(response.status() == StatusCode::from_u16(206).unwrap());
+            response
+        }
+    };
+    let reciving_guard = ();//
+    let mut stream = response.bytes_stream();
+    while let Some(item) = stream.next().await{
+        let chunk = item?;
+        let chunk_size = chunk.len();
+
+        let _guard = //block_guard(block);
+
+        if let Some(end) = end{
+            if *process + chunk_size as u64 > *end.as_ref() {
+                writer.write_all(&chunk[..(*end.as_ref() - *process) as usize]).await?;
+                *process += *end.as_ref() - *process;
+                tracker.record((*end.as_ref() - *process) as u32, *process).await;
+                break;
+            };
+        };
+
+        writer.write_all(chunk.as_ref()).await?;
+        *process += chunk_size as u64;
+        tracker.record(chunk_size as u32, *process).await;
+    }
+    Ok(())
+}
+
 
 enum CheckType{
     ETag(HeaderValue),
@@ -389,17 +438,17 @@ impl BlockState {
 }
 
 impl AtomBlockState {
-    pub fn get(&self) -> BlockState{
+    pub fn get(&self) -> Self{
         match self.state.load(Ordering::Acquire) {
-            0 => BlockState::Pending,
-            1 => BlockState::Requesting{task: unsafe{self.abort_handle.assume_init_ref().clone()}},
-            2 => BlockState::Receving{task: unsafe{self.abort_handle.assume_init_ref().clone()}},
-            3 => BlockState::Done,
+            0 => Self::Pending,
+            1 => Self::Requesting{task: unsafe{self.abort_handle.assume_init_ref().clone()}},
+            2 => Self::Receving{task: unsafe{self.abort_handle.assume_init_ref().clone()}},
+            3 => Self::Done,
             _ => unreachable!("Invalid state")
         }
     }
 
-    pub(crate) fn set(&self, state:BlockState){
+    pub(crate) fn set(&self, state:Self){
         let val = match state {
             BlockState::Pending => 0,
             BlockState::Requesting{task} => {1},
