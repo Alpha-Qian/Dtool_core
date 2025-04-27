@@ -26,30 +26,6 @@ struct ResponseRange{
     end: Option<u64>,
 }
 
-impl ResponseRange {
-    pub fn new_none(process: u64, end: u64) -> Self {
-    }
-
-    pub fn new_some(response: Response) -> Self {
-    }
-
-    pub unsafe fn new_some_unchecked(response: Response, process: u64, end: u64) -> Self {
-
-    }
-
-    fn get_response_mut(&mut self) -> Option<&mut Response> {
-        match self {
-
-        }
-    }
-
-    fn into_parts(self) -> (Option<Response>, u64, u64) {
-        match self {
-        }
-    }
-
-}
-
 enum EndType<'a>{
     u64(NonNull<u64>),
     Atomicu64(&'a AtomicU64),
@@ -91,7 +67,7 @@ pub(crate) async unsafe fn download_block(//不如作为单独的函数
     let mut writer = cache.write_at(SeekFrom::Start(process)).await;
     loop {
         //use std::ops::ControlFlow;
-        download_once(url, first_response, client, &mut writer, tracker, &mut process, end).await;
+
     };
         let finally_result = todo!("handing result");//handing result
         let a = panic!();
@@ -105,10 +81,9 @@ pub(crate) async unsafe fn download_once(
     first_response: Option<Response>,
     client: &Client,
     writer: &mut impl Writer,
-    tracker: &impl Tracker,
 
-    process: &mut u64,
-    end: EndType<'_>,
+    process: impl ProcessSync,
+    end: impl EndSync,
 ) -> DownloadResult<()> 
 {
     let response = match first_response {
