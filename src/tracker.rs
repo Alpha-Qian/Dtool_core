@@ -65,8 +65,8 @@ impl Tracker for Nil {
 
 impl <T: Tracker, H: Tracker> Tracker for TracherHList<T, H> {
     async fn record(&self, len: u32, process: u64) {
-        self.head.record(len, process: u64).await;
-        self.tail.record(len, process: u64).await;
+        self.head.record(len, process).await;
+        self.tail.record(len, process).await;
     }
 }
 

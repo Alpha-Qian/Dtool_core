@@ -5,6 +5,7 @@ mod cache;
 //mod controler;
 mod speed;
 mod parse_handers;
+mod download_core;
 mod downloader;
 mod error;
 mod tracker;
