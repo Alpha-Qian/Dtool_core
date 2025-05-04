@@ -56,10 +56,9 @@ pub(crate) async unsafe fn download_block(//不如作为单独的函数
     headers_builder: impl FnOnce(&mut HeaderMap),
     client: &Client,
     cache: &impl Cacher,
-    tracker: &impl Tracker,
 
-    process: u64,//进度
-    end: EndType<'_>,//可选的，是否提前结束
+    process_sync: &mut impl ProcessSync,
+    end_sync: &mut impl EndSync,
 
     first_response: Option<Response>,//这里假设了block是对应first_response的范围
 ) -> DownloadResult<()>
@@ -82,18 +81,17 @@ pub(crate) async unsafe fn download_once(
     client: &Client,
     writer: &mut impl Writer,
 
-    process: impl ProcessSync,
-    end: impl EndSync,
+    process_sync: &mut impl ProcessSync,
+    end_sync: &mut impl EndSync,
 ) -> DownloadResult<()> 
 {
     let response = match first_response {
         Some(r) => r,
         None => {
             let mut req = Request::new(Method::GET, url.clone());
-            let range = match end {
-                EndType::u64(end) => Range::bytes(*process..*end.as_ref()).expect("msg"),
-                EndType::Atomicu64(end ) =>Range::bytes(*process..*end).expect("msg"),
-                EndType::None => Range::bytes(*process..).expect("msg"),
+            let range = match end_sync.get_end().await {
+                Some(end) => Range::bytes(process_sync.get_process().await..end).expect("msg"),
+                None => Range::bytes(process_sync.get_process().await..).expect("msg"),
             };
             req.headers_mut().typed_insert(range);
             //headers_builder(req.headers_mut());
@@ -108,26 +106,17 @@ pub(crate) async unsafe fn download_once(
         let chunk = item?;
         let chunk_size = chunk.len();
 
-        let _guard = true;//block_guard(block);
-
-        let a = match end {
-            EndType::u64(end) => Some(*end.as_ref()),
-            EndType::Atomicu64(end) => Some(end.load(Ordering::Acquire)),
-            EndType::None => None,
-        };
-
-        if let Some(end) = a{
-            if *process + chunk_size as u64 > end {
-                writer.write_all(&chunk[..(end - *process) as usize]).await?;
-                *process += end - *process;
-                tracker.record((end - *process) as u32, *process).await;
+        if let Some(end) = end_sync.get_end().await {
+            let process = process_sync.get_process().await;
+            if process + chunk_size as u64 > end {
+                writer.write_all(&chunk[..(end - process) as usize]).await?;
+                process_sync.fetch_add((end - process) as u32).await;
                 break;
             };
         };
 
         writer.write_all(chunk.as_ref()).await?;
-        *process += chunk_size as u64;
-        tracker.record(chunk_size as u32, *process).await;
+        process_sync.fetch_add(chunk_size as u32).await;
     }
     Ok(())
 }
@@ -140,15 +129,13 @@ pub(crate) async unsafe fn download_unrangeable(
     tracker: &impl Tracker,
 
     process: u64,
-    end: Option<NonNull<u64>>,//很有可能是None
+    end: &mut impl EndSync,
 
     first_response: Option<Response>,
 
 ){
     let mut writer = cache.write_at(SeekFrom::Start(process)).await;
     loop{
-        let result = download_once_unrangeable(url, first_response, client, &mut writer, tracker, &mut process, end).await;
-
     }
 }
 
@@ -158,11 +145,10 @@ pub(crate) async unsafe fn download_once_unrangeable(
     first_response: Option<Response>,
     client: &Client,
     writer: &mut impl Writer,
-    tracker: &impl Tracker,
-    writed_tracker: &impl Tracker,
 
-    write_process: &mut u64,
-    end: Option<NonNull<u64>>,
+    download_process_sync: &mut impl ProcessSync,
+    writed_process_sync: &mut impl ProcessSync,//?
+    end_sync: &mut impl EndSync,
 
     // build_request: impl FnOnce(&mut HeaderMap, &mut Option<Duration>, &mut Option<Version>),
     // check_response: impl FnOnce(&Response) -> Result<CheckType, DownloadError>,
@@ -184,21 +170,9 @@ pub(crate) async unsafe fn download_once_unrangeable(
     };
 
     let mut stream = response.bytes_stream();
-    let mut download_process = 0;
     while let Some(item) = stream.next().await{
         let chunk = item?;
         let chunk_size = chunk.len();
-
-        let _guard = //block_guard(block);
-
-        download_process += chunk_size as u64;
-        if download_process > *write_process {
-            writed_tracker.record(chunk.len() as u32, *write_process).await;
-            writer.write_all(&chunk[..(download_process - *write_process) as usize]).await?;
-            *write_process = download_process;
-            break;
-        }
-        writed_tracker.record(chunk_size as u32, *write_process).await;
     }
 
     while let Some(item) = stream.next().await{
@@ -212,18 +186,10 @@ pub(crate) async unsafe fn download_once_unrangeable(
 }
 
 
-enum CheckType{
-    ETag(HeaderValue),
-    LastMotifield(HeaderValue),
-    None,
-}
-
-
-
-
 fn deafult_build_request(headers:&mut HeaderMap, duration: &mut Option<Duration>, version: &mut Option<Version>){
     *duration = Some(Duration::from_secs(30));
 }
+
 // trait download_once{
 //     type reciving_guard;
 //     type process_guard;
@@ -261,6 +227,29 @@ trait EndSync{
     async fn get_end(&self) -> Option<u64>;
 }
 
+
+struct RequestSender<'a>{
+    url: &'a Url,
+    client: &'a Client,
+    request_builder: RequestBuilder,
+    response_checker: ResponseCheker,
+    response: Option<Response>,
+}
+
+impl<'a> RequestSender<'a>{
+    async fn send_request(&mut self) -> Result<Response, DownloadError>{
+        let mut req = Request::new(Method::GET, self.url.clone());
+        (self.request_builder)(&mut req.headers_mut(), &mut None, &mut None);
+        let response = self.client.execute(req).await?;
+        self.response_checker(&response)?;
+    }
+
+    async fn get_first_response(&client: &Client, url: &Url, request_builder: RequestBuilder, response_checker: ResponseCheker) -> Self{
+        
+
+    }
+
+}
 #[cfg(test)]
 mod tests{
     #[test]
