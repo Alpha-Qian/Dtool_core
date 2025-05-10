@@ -51,7 +51,7 @@ impl Tracker for Track {
 #[inline]
 pub(crate) async unsafe fn download_once(
 
-    stream: &mut impl StreamExt<Item = Result<Bytes, reqwest::Error>>,
+    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     writer: &mut impl Writer,
 
     process_sync: &mut impl ProcessSync,
@@ -77,34 +77,13 @@ pub(crate) async unsafe fn download_once(
     Ok(())
 }
 
-///不可续传链接的多次下载
-pub(crate) async unsafe fn download_unrangeable(
-    url: &Url,
-    client: &Client,
-    cache: &impl Cacher,
-    tracker: &impl Tracker,
-
-    process: u64,
-    end: &mut impl EndSync,
-
-    first_response: Option<Response>,
-
-){
-    let mut writer = cache.write_at(SeekFrom::Start(process)).await;
-    loop{
-    }
-}
-
-
 pub(crate) async unsafe fn download_once_unrangeable(
-    url: &Url,
-    first_response: Option<Response>,
-    client: &Client,
+    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     writer: &mut impl Writer,
 
     download_process_sync: &mut impl ProcessSync,
     writed_process_sync: &mut impl ProcessSync,//?
-    end_sync: &mut impl EndSync,
+    end_sync: &mut impl EndSync,//因为不能续传，似乎不需要EndSync trait
 
     // build_request: impl FnOnce(&mut HeaderMap, &mut Option<Duration>, &mut Option<Version>),
     // check_response: impl FnOnce(&Response) -> Result<CheckType, DownloadError>,
@@ -112,20 +91,6 @@ pub(crate) async unsafe fn download_once_unrangeable(
     // process_guard: impl FnOnce() -> impl Future<Output=Result<()>>,
 ) -> DownloadResult<()> 
 {
-    let response = match first_response {
-        Some(r) => r,
-        None => {
-            let mut req = Request::new(Method::GET, url.clone());
-            //build request here
-            //headers_builder(req.headers_mut());
-            let response = client.execute(req).await?;
-            assert!(response.status() == StatusCode::from_u16(206).unwrap());
-            //check response here
-            response
-        }
-    };
-
-    let mut stream = response.bytes_stream();
     while let Some(item) = stream.next().await{
         let chunk = item?;
         let chunk_size = chunk.len();
