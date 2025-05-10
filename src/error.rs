@@ -4,7 +4,7 @@ use reqwest::Response;
 
 
 #[derive(Error, Debug)]
-enum DownloadError<T> {
+pub enum DownloadError<T> {
     #[error("")]
     ReqwestEorror(#[from] reqwest::Error),
     #[error("写入相关错误{:?}",.0)]

@@ -17,8 +17,8 @@ use bytes::Bytes;
 use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
 
 use crate::cache::{Writer, Cacher};
-use crate::tracker::Tracker;
 use crate::error::DownloadError;
+type DownloadResult<T> = Result<T, DownloadError>;
 
 #[inline]
 pub(crate) async unsafe fn download_once(
@@ -28,7 +28,7 @@ pub(crate) async unsafe fn download_once(
 
     process_sync: &mut impl ProcessSync,
     end_sync: &mut impl EndSync,
-) -> DownloadResult<()> 
+) -> DownloadResult<()>
 {
     while let Some(item) = stream.next().await{
         let chunk = item?;
@@ -40,7 +40,7 @@ pub(crate) async unsafe fn download_once(
     Ok(())
 }
 
-type DownloadResult<T> = Result<T, DownloadError>;
+
 #[inline]
 pub(crate) async fn write_once_to_end(
     chunk: &[u8],
@@ -69,44 +69,19 @@ pub(crate) async fn jump_to_write_position(
     cacher: &mut impl Cacher,
     process_sync: &mut impl ProcessSync,
     jump_to: u64,
-) -> DownloadResult<Writer>{
+) -> DownloadResult<impl Writer>{
     while let Some(item) = stream.next().await{
         let chunk = item?;
         let chunk_size = chunk.len();
         process_sync.fetch_add(chunk_size as u32).await;
         let process = process_sync.get_process().await;
         if process >= jump_to {
-            writer = cacher.write_at(SeekFrom::Start(jump_to)).await?;
+            let writer = cacher.write_at(SeekFrom::Start(jump_to)).await;
+            writer.write_all(&chunk[(jump_to - process) as usize..]).await?;
             return Ok(writer);
         }
     };
     Err(())
-}
-    
-pub(crate) async unsafe fn download_once_unrangeable(
-    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
-    writer: &mut impl Writer,
-
-    download_process_sync: &mut impl ProcessSync,
-    writed_process: &mut u64,
-    end_sync: &u64,
-
-) -> DownloadResult<()> 
-{
-    while let Some(item) = stream.next().await{
-        let chunk = item?;
-        let chunk_size = chunk.len();
-
-    }
-
-    while let Some(item) = stream.next().await{
-        let chunk = item?;
-        let chunk_size = chunk.len();
-        if 
-    }
-
-
-    Ok(())
 }
 
 trait ProcessSync{
@@ -118,29 +93,6 @@ trait EndSync{
     async fn get_end(&self) -> Option<u64>;
 }
 
-
-struct RequestSender<'a>{
-    url: &'a Url,
-    client: &'a Client,
-    request_builder: RequestBuilder,
-    response_checker: ResponseCheker,
-    response: Option<Response>,
-}
-
-impl<'a> RequestSender<'a>{
-    async fn send_request(&mut self) -> Result<Response, DownloadError>{
-        let mut req = Request::new(Method::GET, self.url.clone());
-        (self.request_builder)(&mut req.headers_mut(), &mut None, &mut None);
-        let response = self.client.execute(req).await?;
-        self.response_checker(&response)?;
-    }
-
-    async fn get_first_response(&client: &Client, url: &Url, request_builder: RequestBuilder, response_checker: ResponseCheker) -> Self{
-        
-
-    }
-
-}
 #[cfg(test)]
 mod tests{
     #[test]
