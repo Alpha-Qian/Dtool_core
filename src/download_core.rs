@@ -32,7 +32,7 @@ pub(crate) async unsafe fn download_once(
 {
     while let Some(item) = stream.next().await{
         let chunk = item?;
-        let control_flow: ControlFlow<()> = write_once_to_end(chunk.as_ref(), writer, process_sync, end_sync).await?;
+        let control_flow: ControlFlow<()> = write_once(chunk.as_ref(), writer, process_sync, end_sync).await?;
         if let ControlFlow::Break(_) = control_flow {
             return Ok(());
         }
@@ -42,14 +42,14 @@ pub(crate) async unsafe fn download_once(
 
 
 #[inline]
-pub(crate) async fn write_once_to_end(
+pub(crate) async fn write_once(
     chunk: &[u8],
     writer: &mut impl Writer,
     process_sync: &mut impl ProcessSync,
     end_sync: &mut impl EndSync,
-) -> DownloadResult<ControlFlow<()>> 
+) -> DownloadResult<ControlFlow<()>>
 {
-    if let Some(end) = end_sync.get_end().await {
+    if let Some(end) = end_sync.get_end().await{ 
         let process = process_sync.get_process().await;
         if process + chunk.len() as u64 > end {
             writer.write_all(&chunk[..(end - process) as usize]).await?;
@@ -75,13 +75,13 @@ pub(crate) async fn jump_to_write_position(
         let chunk_size = chunk.len();
         process_sync.fetch_add(chunk_size as u32).await;
         let process = process_sync.get_process().await;
-        if process >= jump_to {
+        if process > jump_to {
             let writer = cacher.write_at(SeekFrom::Start(jump_to)).await;
             writer.write_all(&chunk[(jump_to - process) as usize..]).await?;
             return Ok(writer);
         }
     };
-    Err(())
+    Ok(())
 }
 
 trait ProcessSync{
@@ -90,9 +90,10 @@ trait ProcessSync{
 }
 
 trait EndSync{
-    async fn get_end(&self) -> Option<u64>;
+    async fn get_end(&self) -> Option<u64>{
+        None
+    }
 }
-
 #[cfg(test)]
 mod tests{
     #[test]
