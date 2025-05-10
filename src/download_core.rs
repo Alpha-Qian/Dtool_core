@@ -11,7 +11,7 @@ use reqwest::{
     }, Client, Method, Request, Response, StatusCode, Url, Version
 };
 
-use futures::stream::StreamExt;
+use futures::stream::{self, StreamExt};
 use bytes::Bytes;
 
 use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
@@ -19,34 +19,6 @@ use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
 use crate::cache::{Writer, Cacher};
 use crate::tracker::Tracker;
 use crate::error::DownloadError;
-use tokio::sync::watch::channel;
-use parking_lot::Mutex;
-
-struct ResponseRange{
-    response: Option<Response>,
-    process: u64,
-    end: Option<u64>,
-}
-
-enum EndType<'a>{
-    u64(NonNull<u64>),
-    Atomicu64(&'a AtomicU64),
-    None,
-}
-
-type RequestBuilder = fn(&mut HeaderMap, &mut Option<Duration>, &mut Option<Version>);
-type ResponseCheker = fn(&Response) -> Result<(), DownloadError>;
-type ResultHander = fn(reqwest::Result<()>) -> DownloadResult<()>;
-type SyncEnd = fn() -> Option<u64>;
-type Track = FnMut(u32, u64) -> JoinHandle<()>;
-
-impl Tracker for Track {
-    fn record(&self, len: u32, process: u64) -> impl Future<Output = ()> {
-        self(len, process)
-    }
-}
-
-
 
 #[inline]
 pub(crate) async unsafe fn download_once(
@@ -99,6 +71,26 @@ pub(crate) async fn write_once_to_end(
     Ok(ControlFlow::Continue(()))
 }
 
+#[inline]
+pub(crate) async fn jump_to_write_position(
+    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
+    cacher: &mut impl Cacher,
+    process_sync: &mut impl ProcessSync,
+    jump_to: u64,
+) -> DownloadResult<Writer>{
+    while let Some(item) = stream.next().await{
+        let chunk = item?;
+        let chunk_size = chunk.len();
+        process_sync.fetch_add(chunk_size as u32).await;
+        let process = process_sync.get_process().await;
+        if process >= jump_to {
+            writer = cacher.write_at(SeekFrom::Start(jump_to)).await?;
+            return Ok(writer);
+        }
+    };
+    Err(())
+}
+    
 pub(crate) async unsafe fn download_once_unrangeable(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     writer: &mut impl Writer,
@@ -129,34 +121,6 @@ pub(crate) async unsafe fn download_once_unrangeable(
 fn deafult_build_request(headers:&mut HeaderMap, duration: &mut Option<Duration>, version: &mut Option<Version>){
     *duration = Some(Duration::from_secs(30));
 }
-
-// trait download_once{
-//     type reciving_guard;
-//     type process_guard;
-//     fn build_request(&mut self, headers:&mut HeaderMap, duration: &mut Option<Duration>, version: &mut Option<Version>){
-//         *duration = Some(Duration::from_secs(30));
-//     }
-//     fn check_response(&self, response: &Response) -> Result<CheckType, DownloadError>{
-//         match response.headers().get(header::ETAG){
-//             Some(etag) => Ok(CheckType::ETag(etag.clone())),
-//             None => match response.headers().get(header::LAST_MODIFIED){
-//                 Some(last_modified) => Ok(CheckType::LastMotifield(last_modified.clone())),
-//                 None => Ok(CheckType::None),
-//             }
-//         }
-//     }
-
-//     async fn reciving_guard() -> Self::reciving_guard;
-
-//     async fn process_guard() -> Self::process_guard;
-// }
-
-// trait EndSync{
-//     fn get_end(&self) -> Option<u64>;
-//     fn get_end_without_lock(&self) -> Option<u64>{
-//         self.get_end()
-//     }
-// }
 
 trait ProcessSync{
     async fn fetch_add(&mut self, len: u32);
