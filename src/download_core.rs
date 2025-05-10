@@ -12,6 +12,8 @@ use reqwest::{
 };
 
 use futures::stream::StreamExt;
+use bytes::Bytes;
+
 use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
 
 use crate::cache::{Writer, Cacher};
@@ -43,65 +45,19 @@ impl Tracker for Track {
         self(len, process)
     }
 }
-///尝试可续传链接的多次下载，非致命错误会重试
-/// 遵守以下规则以保证不会发生未定义行为：
-///  1.shared_process和end参数必须在调用获取锁闭包后可用
-/// 遵守以下规则以保证不会发生错误的行为：
-///  1.process参数必须正确对应response范围响应的起始位置
-///  2.end参数必须不能超过对应response范围响应的终止位置
-///  3.
-#[inline]
-pub(crate) async unsafe fn download_block(//不如作为单独的函数
-    url: &Url,
-    headers_builder: impl FnOnce(&mut HeaderMap),
-    client: &Client,
-    cache: &impl Cacher,
 
-    process_sync: &mut impl ProcessSync,
-    end_sync: &mut impl EndSync,
-
-    first_response: Option<Response>,//这里假设了block是对应first_response的范围
-) -> DownloadResult<()>
-{
-    let mut writer = cache.write_at(SeekFrom::Start(process)).await;
-    loop {
-        //use std::ops::ControlFlow;
-
-    };
-        let finally_result = todo!("handing result");//handing result
-        let a = panic!();
-        finally_result
-}
 
 
 #[inline]
 pub(crate) async unsafe fn download_once(
-    url: &Url,
-    first_response: Option<Response>,
-    client: &Client,
+
+    stream: &mut impl StreamExt<Item = Result<Bytes, reqwest::Error>>,
     writer: &mut impl Writer,
 
     process_sync: &mut impl ProcessSync,
     end_sync: &mut impl EndSync,
 ) -> DownloadResult<()> 
 {
-    let response = match first_response {
-        Some(r) => r,
-        None => {
-            let mut req = Request::new(Method::GET, url.clone());
-            let range = match end_sync.get_end().await {
-                Some(end) => Range::bytes(process_sync.get_process().await..end).expect("msg"),
-                None => Range::bytes(process_sync.get_process().await..).expect("msg"),
-            };
-            req.headers_mut().typed_insert(range);
-            //headers_builder(req.headers_mut());
-            let response = client.execute(req).await?;
-            assert!(response.status() == StatusCode::from_u16(206).unwrap());
-            response
-        }
-    };
-    let reciving_guard = ();//
-    let mut stream = response.bytes_stream();
     while let Some(item) = stream.next().await{
         let chunk = item?;
         let chunk_size = chunk.len();

@@ -885,6 +885,7 @@ dependencies = [
 name = "rsdtool"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "futures",
  "headers",
  "parking_lot",
