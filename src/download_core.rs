@@ -32,23 +32,15 @@ pub(crate) async unsafe fn download_once(
 {
     while let Some(item) = stream.next().await{
         let chunk = item?;
-        let chunk_size = chunk.len();
-
-        if let Some(end) = end_sync.get_end().await {
-            let process = process_sync.get_process().await;
-            if process + chunk_size as u64 > end {
-                writer.write_all(&chunk[..(end - process) as usize]).await?;
-                process_sync.fetch_add((end - process) as u32).await;
-                break;
-            };
-        };
-
-        writer.write_all(chunk.as_ref()).await?;
-        process_sync.fetch_add(chunk_size as u32).await;
+        let control_flow: ControlFlow<()> = write_once_to_end(chunk.as_ref(), writer, process_sync, end_sync).await?;
+        if let ControlFlow::Break(_) = control_flow {
+            return Ok(());
+        }
     }
     Ok(())
 }
 
+type DownloadResult<T> = Result<T, DownloadError>;
 #[inline]
 pub(crate) async fn write_once_to_end(
     chunk: &[u8],
@@ -59,7 +51,7 @@ pub(crate) async fn write_once_to_end(
 {
     if let Some(end) = end_sync.get_end().await {
         let process = process_sync.get_process().await;
-        if process + chunk_size as u64 > end {
+        if process + chunk.len() as u64 > end {
             writer.write_all(&chunk[..(end - process) as usize]).await?;
             process_sync.fetch_add((end - process) as u32).await;
             return Ok(ControlFlow::Break(()));
@@ -67,7 +59,7 @@ pub(crate) async fn write_once_to_end(
     };
 
     writer.write_all(chunk.as_ref()).await?;
-    process_sync.fetch_add(chunk_size as u32).await;
+    process_sync.fetch_add(chunk.len() as u32).await;
     Ok(ControlFlow::Continue(()))
 }
 
@@ -115,11 +107,6 @@ pub(crate) async unsafe fn download_once_unrangeable(
 
 
     Ok(())
-}
-
-
-fn deafult_build_request(headers:&mut HeaderMap, duration: &mut Option<Duration>, version: &mut Option<Version>){
-    *duration = Some(Duration::from_secs(30));
 }
 
 trait ProcessSync{
