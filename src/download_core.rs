@@ -2,37 +2,26 @@
 use std::{future::Future, io::SeekFrom, mem::{transmute,MaybeUninit}, os::windows::process, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}, time::Duration};
 use std::ops::ControlFlow;
 use std::ptr::NonNull;
-use headers::{self,
-    HeaderMapExt,
-    Range};
-use reqwest::{
-    self, header::{
-        self, HeaderMap,HeaderValue, IF_MATCH, IF_RANGE, RANGE
-    }, Client, Method, Request, Response, StatusCode, Url, Version
-};
 
-use futures::stream::{self, StreamExt};
+use futures::stream::StreamExt;
 use bytes::Bytes;
-
-use tokio::{sync::SemaphorePermit, task::{AbortHandle, JoinHandle, JoinSet}};
-
 use crate::cache::{Writer, Cacher};
 use crate::error::DownloadError;
 type DownloadResult<T> = Result<T, DownloadError>;
 
+type bufstream<A: StreamExt<Item = Result<impl AsRef<[u8]>, E>> + std::marker::Unpin, E: Into<DownloadError>> = A;
+
 #[inline]
 pub(crate) async unsafe fn download_once(
-
-    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
+    stream: &mut (impl StreamExt<Item = Result<impl AsRef<[u8]>, impl Into<DownloadError>>> + std::marker::Unpin),
     writer: &mut impl Writer,
-
     process_sync: &mut impl ProcessSync,
     end_sync: &mut impl EndSync,
 ) -> DownloadResult<()>
 {
     while let Some(item) = stream.next().await{
         let chunk = item?;
-        let control_flow: ControlFlow<()> = write_once(chunk.as_ref(), writer, process_sync, end_sync).await?;
+        let control_flow = write_once(chunk.as_ref(), writer, process_sync, end_sync).await?;
         if let ControlFlow::Break(_) = control_flow {
             return Ok(());
         }
@@ -64,7 +53,7 @@ pub(crate) async fn write_once(
 }
 
 #[inline]
-pub(crate) async fn jump_to_write_position(
+pub async fn jump_to_write_position(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     cacher: &mut impl Cacher,
     process_sync: &mut impl ProcessSync,
@@ -84,6 +73,17 @@ pub(crate) async fn jump_to_write_position(
     Ok(())
 }
 
+pub async fn unrangeable_download_once(
+    stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
+    jump_to: u64,
+    cacher: &mut impl Cacher,
+    process_sync: &mut impl ProcessSync,
+) -> DownloadResult<()> {
+    let writer = jump_to_write_position(stream, cacher, process_sync, jump_to).await?;
+    download_once(stream, writer, process_sync, end_sync).await?;
+}
+
+
 trait ProcessSync{
     async fn fetch_add(&mut self, len: u32);
     async fn get_process(&self) -> u64;
@@ -94,11 +94,11 @@ trait EndSync{
         None
     }
 }
+
 #[cfg(test)]
 mod tests{
     #[test]
     fn test() {
-
         println!("hello world");
     }
 }

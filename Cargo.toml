@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["stream"] }
+#reqwest = { version = "0.11", features = ["stream"] }
 futures = "0.3.31"
-tokio = { version = "1.0", features = ["full"] }
-tokio-util = { version = "0.7"}
-parking_lot = "0.12"
+#tokio = { version = "1.0", features = ["full"] }
+#tokio-util = { version = "0.7"}
+#parking_lot = "0.12"
 thiserror = "2.0.12"
-percent-encoding = "2.3"
-headers = "0.3.9"
+#percent-encoding = "2.3"
+#headers = "0.3.9"
 bytes = "1"

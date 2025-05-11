@@ -1,5 +1,4 @@
 use thiserror::Error;
-use reqwest::Response;
 
 
 
@@ -11,8 +10,8 @@ pub enum DownloadError {
     WriteError(#[from] WriteError<T>),
     #[error("不是范围请求")]
     NoPartialResponseError,
-    #[error("")]
-    FileChangedError(#[from] FileChangedError),
+    // #[error("")]
+    // FileChangedError(#[from] FileChangedError),
 }
 
 ///
