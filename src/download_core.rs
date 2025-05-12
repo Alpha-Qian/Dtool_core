@@ -84,14 +84,21 @@ pub async fn unrangeable_download_once(
 }
 
 
-trait ProcessSync{
+trait ProcessSync{//ProcessSender
     async fn fetch_add(&mut self, len: u32);
-    async fn get_process(&self) -> u64;
+    async fn get_process(&self) -> Option<u64>;
+    async fn get_unwarp(&self) -> u64{
+        self.get_process().unwarp()
+    }
 }
 
-trait EndSync{
+trait EndSync{//EndRecivee
     async fn get_end(&self) -> Option<u64>{
         None
+    }
+    
+    async fn get_unwarp(&self) -> u64{
+        self.get_end().unwarp()
     }
 }
 
