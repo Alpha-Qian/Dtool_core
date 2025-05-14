@@ -1,21 +1,19 @@
-use thiserror::Error;
+use std::result::Result;
 
 
-
-#[derive(Error, Debug)]
-pub enum DownloadError {
-    #[error("")]
-    ReqwestEorror(#[from] reqwest::Error),
-    #[error("写入相关错误{:?}",.0)]
-    WriteError(#[from] WriteError<T>),
-    #[error("不是范围请求")]
-    NoPartialResponseError,
-    // #[error("")]
-    // FileChangedError(#[from] FileChangedError),
+#[derive(Debug)]
+pub enum DownloadCoreError<I, W>
+where
+    I: std::error::Error + 'static,
+    W: std::error::Error + 'static + std::fmt::Debug,
+{
+    InternetEorror(I),
+    WriteError(W),
 }
 
-///
-#[derive(Debug)]
-struct WriteError<T>{
-    inner: T
+#[cfg(test)]
+mod test{
+    fn a(){
+        Result::map_err(self, op)
+    }
 }

@@ -1,26 +1,32 @@
 //use std::io::SeekFrom;
-use std::{future::Future, io::SeekFrom, mem::{transmute,MaybeUninit}, os::windows::process, sync::{atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering}, Arc}, time::Duration};
+use std::{io::SeekFrom};
 use std::ops::ControlFlow;
 use std::ptr::NonNull;
 
-use futures::stream::StreamExt;
+use futures_util::stream::StreamExt;
 use bytes::Bytes;
 use crate::cache::{Writer, Cacher};
-use crate::error::DownloadError;
-type DownloadResult<T> = Result<T, DownloadError>;
+use crate::error::DownloadCoreError;
+use crate::stream::{bufstream};
+type DownloadResult<T> = Result<T, DownloadCoreError>;
 
-type bufstream<A: StreamExt<Item = Result<impl AsRef<[u8]>, E>> + std::marker::Unpin, E: Into<DownloadError>> = A;
+
+macro_rules! impl_stream{
+    () => {
+        (impl StreamExt<Item = Result<impl AsRef<[u8]>, impl Into<DownloadError>>> + Unpin)
+    };
+}
 
 #[inline]
-pub(crate) async unsafe fn download_once(
-    stream: &mut (impl StreamExt<Item = Result<impl AsRef<[u8]>, impl Into<DownloadError>>> + std::marker::Unpin),
+pub(crate) async unsafe fn download_once<A>(
+    stream: &mut impl_stream!(),
     writer: &mut impl Writer,
-    process_sync: &mut impl ProcessSync,
-    end_sync: &mut impl EndSync,
+    process_sync: &mut impl ProcessSender,
+    end_sync: &mut impl EndReciver,
 ) -> DownloadResult<()>
 {
     while let Some(item) = stream.next().await{
-        let chunk = item?;
+        let chunk = item.map_err(op)?;
         let control_flow = write_once(chunk.as_ref(), writer, process_sync, end_sync).await?;
         if let ControlFlow::Break(_) = control_flow {
             return Ok(());
@@ -34,14 +40,14 @@ pub(crate) async unsafe fn download_once(
 pub(crate) async fn write_once(
     chunk: &[u8],
     writer: &mut impl Writer,
-    process_sync: &mut impl ProcessSync,
-    end_sync: &mut impl EndSync,
+    process_sync: &mut impl ProcessSender,
+    end_sync: &mut impl EndReciver,
 ) -> DownloadResult<ControlFlow<()>>
 {
-    if let Some(end) = end_sync.get_end().await{ 
-        let process = process_sync.get_process().await;
+    if let (Some(end), Some(process)) = (end_sync.get_end().await, process_sync.get_process().await){
+        //let process = process_sync.get_process().await;
         if process + chunk.len() as u64 > end {
-            writer.write_all(&chunk[..(end - process) as usize]).await?;
+            writer.write_all(&chunk[..(end - process) as usize]).await.map_err(op)?;
             process_sync.fetch_add((end - process) as u32).await;
             return Ok(ControlFlow::Break(()));
         };
@@ -56,7 +62,7 @@ pub(crate) async fn write_once(
 pub async fn jump_to_write_position(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     cacher: &mut impl Cacher,
-    process_sync: &mut impl ProcessSync,
+    process_sync: &mut impl ProcessSender,
     jump_to: u64,
 ) -> DownloadResult<impl Writer>{
     while let Some(item) = stream.next().await{
@@ -77,28 +83,28 @@ pub async fn unrangeable_download_once(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     jump_to: u64,
     cacher: &mut impl Cacher,
-    process_sync: &mut impl ProcessSync,
+    process_sync: &mut impl ProcessSender,
 ) -> DownloadResult<()> {
     let writer = jump_to_write_position(stream, cacher, process_sync, jump_to).await?;
     download_once(stream, writer, process_sync, end_sync).await?;
 }
 
 
-trait ProcessSync{//ProcessSender
+trait ProcessSender{//ProcessSender
     async fn fetch_add(&mut self, len: u32);
     async fn get_process(&self) -> Option<u64>;
     async fn get_unwarp(&self) -> u64{
-        self.get_process().unwarp()
+        self.get_process().await.unwrap()
     }
 }
 
-trait EndSync{//EndRecivee
+trait EndReciver{//EndReciver
     async fn get_end(&self) -> Option<u64>{
         None
     }
     
     async fn get_unwarp(&self) -> u64{
-        self.get_end().unwarp()
+        self.get_end().await.unwrap()
     }
 }
 

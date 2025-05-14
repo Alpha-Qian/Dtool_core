@@ -4,7 +4,7 @@
 mod cache;
 mod error;
 mod download_core;
-
+mod stream;
 //mod controler;
 //mod speed;
 //mod parse_handers;
