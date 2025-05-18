@@ -13,9 +13,9 @@ use crate::stream::{bufstream};
 type DownloadResult<T, I, W> = Result<T, DownloadCoreError<I, W>>;
 
 
-
+type Cacher = FnOnce()
 #[inline]
-pub(crate) async unsafe fn download_once<S,B,E>(
+pub(crate) async fn download_once<S,B,E>(
     stream: &mut S,
     writer: &mut impl Writer,
     process_sync: &mut impl ProcessSender,
