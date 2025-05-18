@@ -1,10 +1,7 @@
-use std::io::{Read,SeekFrom, Write};
-//use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::SeekFrom;
 
 pub trait Cacher {
     type Write : Writer;
-    //type W: Write + Read;
-    async fn with_capacity(&mut self, capacity: Option<u64>);
     async fn write_at(&self, pos:SeekFrom) -> Self::Write;
 }
 

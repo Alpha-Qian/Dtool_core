@@ -1,3 +1,4 @@
+use std::error::Error;
 //use std::io::SeekFrom;
 use std::{io::SeekFrom};
 use std::ops::ControlFlow;
@@ -6,43 +7,40 @@ use std::ptr::NonNull;
 use futures_util::stream::StreamExt;
 use bytes::Bytes;
 use crate::cache::{Writer, Cacher};
-use crate::error::DownloadCoreError;
+use crate::error::DownloadCoreError::{self, *};
 use crate::stream::{bufstream};
-type DownloadResult<T> = Result<T, DownloadCoreError>;
+
+type DownloadResult<T, I, W> = Result<T, DownloadCoreError<I, W>>;
 
 
-macro_rules! impl_stream{
-    () => {
-        (impl StreamExt<Item = Result<impl AsRef<[u8]>, impl Into<DownloadError>>> + Unpin)
-    };
-}
 
 #[inline]
-pub(crate) async unsafe fn download_once<A>(
-    stream: &mut impl_stream!(),
+pub(crate) async unsafe fn download_once<S,B,E>(
+    stream: &mut S,
     writer: &mut impl Writer,
     process_sync: &mut impl ProcessSender,
     end_sync: &mut impl EndReciver,
 ) -> DownloadResult<()>
+where
+    S: StreamExt<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Error
 {
     while let Some(item) = stream.next().await{
-        let chunk = item.map_err(op)?;
-        let control_flow = write_once(chunk.as_ref(), writer, process_sync, end_sync).await?;
-        if let ControlFlow::Break(_) = control_flow {
-            return Ok(());
-        }
+        let chunk = item.map_err(InternetEorror)?;
+        if let ControlFlow::Break(_) = write_a_chunk(chunk.as_ref(), writer, process_sync, end_sync).await? { break }
     }
     Ok(())
 }
 
 
 #[inline]
-pub(crate) async fn write_once(
+pub(crate) async fn write_a_chunk(
     chunk: &[u8],
     writer: &mut impl Writer,
     process_sync: &mut impl ProcessSender,
     end_sync: &mut impl EndReciver,
-) -> DownloadResult<ControlFlow<()>>
+) -> DownloadResult<ControlFlow<()>, I, W>
 {
     if let (Some(end), Some(process)) = (end_sync.get_end().await, process_sync.get_process().await){
         //let process = process_sync.get_process().await;
