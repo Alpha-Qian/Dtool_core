@@ -48,8 +48,8 @@ pub fn skip_prefix(chunk:&[u8], len: usize) -> ControlFlow<&[u8]> {
 pub(crate) async fn download_once<S,B,E>(
     stream: &mut S,//todo 可以在download_once方法外使用StreamExt的Map方法把stream::item转换成Result<&[u8], DownloadCoreError>
     writer: &mut impl Writer,
-    process_sync: &mut impl ProcessSender,
-    end_sync: &mut impl EndReciver,
+    process_sync: &mut impl AsyncProcessSender,
+    end_sync: &mut impl AsyncEndReciver,
 ) -> DownloadResult<()>
 where
     S: StreamExt<Item = Result<B, E>> + Unpin,
@@ -58,7 +58,18 @@ where
 {
     while let Some(item) = stream.next().await{
         let chunk = item.map_err(InternetEorror)?;
-        if let ControlFlow::Break(_) = write_a_chunk(chunk.as_ref(), writer, process_sync, end_sync).await? { break }
+        //if let ControlFlow::Break(_) = write_a_chunk(chunk.as_ref(), writer, process_sync, end_sync).await? { break }
+        match optional_take_prefix(chunk.as_ref(), end_sync.get_end().await) {
+            ControlFlow::Break(chunk) => {
+                writer.write_all(chunk).await.map_err(op)?;
+                process_sync.fetch_add(chunk.len() as u32).await;
+                break;
+            }
+            ControlFlow::Continue(chunk) => {
+                writer.write_all(chunk).await.map_err(op)?;
+                process_sync.fetch_add(chunk.len() as u32).await;
+            }
+        }
     }
     Ok(())
 }
@@ -68,8 +79,8 @@ where
 pub(crate) async fn write_a_chunk(
     chunk: &[u8],
     writer: &mut impl Writer,
-    process_sync: &mut impl ProcessSender,
-    end_sync: &mut impl EndReciver,
+    process_sync: &mut impl AsyncProcessSender,
+    end_sync: &mut impl AsyncEndReciver,
 ) -> DownloadResult<ControlFlow<()>, I, W>
 {
     if let (Some(end), Some(process)) = (end_sync.get_end().await, process_sync.get_process().await){
@@ -90,7 +101,7 @@ pub(crate) async fn write_a_chunk(
 pub async fn jump_to_write_position(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     cacher: &mut impl Cacher,
-    process_sync: &mut impl ProcessSender,
+    process_sync: &mut impl AsyncProcessSender,
     jump_to: u64,
 ) -> DownloadResult<impl Writer>{
     while let Some(item) = stream.next().await{
@@ -112,14 +123,14 @@ pub async fn unrangeable_download_once(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     jump_to: u64,
     cacher: &mut impl Cacher,
-    process_sync: &mut impl ProcessSender,
+    process_sync: &mut impl AsyncProcessSender,
 ) -> DownloadResult<()> {
     let writer = jump_to_write_position(stream, cacher, process_sync, jump_to).await?;
     download_once(stream, writer, process_sync, end_sync).await?;
 }
 
 
-trait ProcessSender{//ProcessSender
+trait AsyncProcessSender{//ProcessSender
     async fn fetch_add(&mut self, len: u32);
     async fn get_process(&self) -> Option<u64>;
     async fn get_unwarp(&self) -> u64{
@@ -127,7 +138,7 @@ trait ProcessSender{//ProcessSender
     }
 }
 
-trait EndReciver{//EndReciver
+trait AsyncEndReciver{//EndReciver
     async fn get_end(&self) -> Option<u64>{
         None
     }
@@ -136,7 +147,44 @@ trait EndReciver{//EndReciver
         self.get_end().await.unwrap()
     }
 }
-
+///同步的ProcessSender
+trait ProcessSender{
+    fn fetch_add(&mut self, len: u32);
+    fn get_process(&self) -> Option<u64>;
+    fn get_unwarp(&self) -> u64{
+        self.get_process().unwrap()
+    }
+}
+///同步的EndReciver
+trait EndReciver{
+    fn get_end(&self) -> Option<u64>{
+        None
+    }
+    
+    fn get_unwarp(&self) -> u64{
+        self.get_end().unwrap()
+    }
+}
+///同步trait可在异步环境中调用
+impl<T> AsyncProcessSender for T where T: ProcessSender{
+    async fn fetch_add(&mut self, len: u32){
+        self.fetch_add(len);
+    }
+    async fn get_process(&self) -> Option<u64>{
+        self.get_process()
+    }
+}
+///同步trait可在异步环境中调用
+impl<T> AsyncEndReciver for T where T: EndReciver{
+    async fn get_end(&self) -> Option<u64>{
+        self.get_end()
+    }
+}
+async fn get_remain(process:&mut impl AsyncProcessSender, end:&mut impl AsyncEndReciver) -> Option<u64>{
+    process.get_process().await.zip(end.get_end().await).map(|(process, end)| {
+        end - process
+    })
+}
 ///将reqwest crate的Stream转换成本crate内的Stream
 fn reqwest_stream_map(stream: impl StreamExt<Item = Result<Bytes, reqwest::Error>>) -> impl StreamExt<Item = Result<Bytes, DownloadCoreError>> {
     stream.map(|item| {
