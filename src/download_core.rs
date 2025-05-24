@@ -13,10 +13,40 @@ use crate::stream::{bufstream};
 type DownloadResult<T, I, W> = Result<T, DownloadCoreError<I, W>>;
 
 
-type Cacher = FnOnce()
+pub fn optional_take_prefix(chunk:&[u8], len: Option<usize>) -> ControlFlow<&[u8], &[u8]> {
+    match len {
+        Some(len) => take_prefix(chunk, len),
+        None => ControlFlow::Continue(chunk),
+    }
+}
+
+pub fn optional_skip_prefix(chunk:&[u8], len: Option<usize>) -> ControlFlow<&[u8]> {
+    match len {
+        Some(len) => skip_prefix(chunk, len),
+        None => ControlFlow::Continue(()),
+    }
+}
+
+///用于处理字节流的函数
+///取出前len个字节
+pub fn take_prefix(chunk:&[u8], len: usize) -> ControlFlow<&[u8], &[u8]> {
+    if len > chunk.len() {
+        return ControlFlow::Continue(chunk);
+    }
+    ControlFlow::Break(&chunk[..len])
+}
+///用于处理字节流的函数
+///跳过前len个字节
+pub fn skip_prefix(chunk:&[u8], len: usize) -> ControlFlow<&[u8]> {
+    if len > chunk.len() {
+        return ControlFlow::Continue(());
+    }
+    ControlFlow::Break(&chunk[len..])
+}
+
 #[inline]
 pub(crate) async fn download_once<S,B,E>(
-    stream: &mut S,
+    stream: &mut S,//todo 可以在download_once方法外使用StreamExt的Map方法把stream::item转换成Result<&[u8], DownloadCoreError>
     writer: &mut impl Writer,
     process_sync: &mut impl ProcessSender,
     end_sync: &mut impl EndReciver,
@@ -77,6 +107,7 @@ pub async fn jump_to_write_position(
     Ok(())
 }
 
+
 pub async fn unrangeable_download_once(
     stream: &mut (impl StreamExt<Item = Result<Bytes, reqwest::Error>> + std::marker::Unpin),
     jump_to: u64,
@@ -106,6 +137,12 @@ trait EndReciver{//EndReciver
     }
 }
 
+///将reqwest crate的Stream转换成本crate内的Stream
+fn reqwest_stream_map(stream: impl StreamExt<Item = Result<Bytes, reqwest::Error>>) -> impl StreamExt<Item = Result<Bytes, DownloadCoreError>> {
+    stream.map(|item| {
+        item.map_err(|e| DownloadCoreError::InternetError(e))
+    })
+}
 #[cfg(test)]
 mod tests{
     #[test]
